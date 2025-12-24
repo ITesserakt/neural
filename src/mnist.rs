@@ -204,8 +204,8 @@ impl<'py> Datasets<'py> {
             test_set: Set {
                 name: String::from("test"),
                 num_rows: test.num_rows,
-                targets: load_all_features_as_ndarray(&train.features, "label")?,
-                features: load_all_features_as_ndarray(&train.features, "image")?,
+                targets: load_all_features_as_ndarray(&test.features, "label")?,
+                features: load_all_features_as_ndarray(&test.features, "image")?,
             },
         })
     }

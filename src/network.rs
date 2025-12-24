@@ -138,12 +138,12 @@ where
             parameters: Parameters {
                 weights: Array2::random_using(
                     (size, previous_size),
-                    normal.map(|it| it * (T::from(2.0 / (size + previous_size) as f64).unwrap())),
+                    normal.map(|it| it * (T::from(2.0 / (size + previous_size) as f64).unwrap().sqrt())),
                     &mut self.rng,
                 ),
                 biases: Array1::random_using(
                     size,
-                    normal.map(|it| it * (T::from(2.0 / size as f64).unwrap())),
+                    normal.map(|it| it * (T::from(2.0 / size as f64).unwrap().sqrt())),
                     &mut self.rng,
                 ),
             },
@@ -247,8 +247,8 @@ impl<T, R> Network<T, Ready, R> {
             })
             .unzip::<_, _, Vec<_>, Vec<_>>();
 
-        let a = softmax_fn().call(ass.pop().unwrap());
-        let mut loss_grad = Zip::from(&a).and(&y).map_collect(|yp, yr| (*yp - *yr) * *yp);
+        let a = ass.pop().unwrap();
+        let mut loss_grad = Zip::from(&a).and(&y).map_collect(|yp, yr| *yp - *yr);
 
         let deltas = self
             .layers
@@ -312,12 +312,13 @@ impl<T, R> Network<T, Ready, R> {
                 combine,
             );
 
+        let scale = learning_rate / T::from(batched_input.nrows()).unwrap();
         self.layers
             .iter_mut()
             .zip(gradients)
             .for_each(|(layer, p)| {
-                layer.weights.scaled_add(learning_rate, &p.weights);
-                layer.biases.scaled_add(learning_rate, &p.biases);
+                layer.weights.scaled_add(-scale, &p.weights);
+                layer.biases.scaled_add(-scale, &p.biases);
             });
     }
 }
