@@ -1,0 +1,25 @@
+[package]
+name = "neural"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ndarray = { version = "0.17", features = ["rayon"] }
+ndarray-linalg = { version = "0.18", features = ["openblas-system"] }
+ndarray-rand = "0.16"
+num-traits = "0.2"
+progressing = "3.0.2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+pyo3 = "0.27"
+numpy = "0.27"
+
+[profile.heavy]
+inherits = 'release'
+lto = "fat"
+strip = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+opt-level = 3
