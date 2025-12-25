@@ -1,4 +1,4 @@
-use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
+use crate::activation::{linear_fn, sigmoid_fn};
 use crate::differentiation::Record;
 use crate::function_v2::Softmax;
 use crate::mnist::Mnist;
@@ -7,10 +7,12 @@ use crate::utils::{Permutation, PermuteArray};
 use ndarray::{ArrayBase, ArrayView1, Axis, Data, Ix1, Zip};
 use num_traits::{Float, One, Zero};
 use progressing::Baring;
-use std::env::args;
+use std::error::Error;
 use std::io::Write;
 use std::ops::DivAssign;
-use tracing::{info, Level};
+use clap::Parser;
+use tracing::{Level};
+use crate::config::Config;
 
 mod activation;
 mod differentiation;
@@ -19,6 +21,7 @@ mod function_v2;
 mod mnist;
 mod network;
 mod utils;
+mod config;
 
 fn cross_entropy<'a, T>(
     yp: ArrayBase<impl Data<Elem: Into<Record<'a, T>> + Clone>, Ix1>,
@@ -39,28 +42,12 @@ where
         })
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
-    let mut args = args();
-    args.next();
-    let dataset_path = args
-        .next()
-        .expect("Dataset path should be the first argument");
-
-    let mnist = match Mnist::load(dataset_path) {
-        Ok(x) => x,
-        Err(e) => {
-            println!("Python error: {e}");
-            return;
-        }
-    };
-    info!(
-        "Successfully extracted dataset with trains = {}, tests = {}",
-        mnist.train().length(),
-        mnist.test().length()
-    );
+    let config = Config::parse();
+    let mnist = config.load_mnist_dataset()?;
 
     let mut network = Network::new(28 * 28)
         .push_hidden_layer(32, sigmoid_fn())
@@ -105,4 +92,6 @@ fn main() {
         println!("{:.3}", test_ys.row(0));
         println!("{error:<50?}");
     }
+
+    Ok(())
 }

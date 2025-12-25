@@ -1,24 +1,38 @@
-use ndarray::{Array, Array2, ArrayView, ArrayView1, ArrayView2, ArrayView3, Dimension, Ix1, Ix3, Zip};
+use ndarray::{
+    Array, Array2, ArrayView, ArrayView1, ArrayView2, ArrayView3, Dimension, Ix1, Ix3, Zip,
+};
+use num_traits::{One, ToPrimitive, Zero};
 use numpy::{dtype, Element, PyArrayMethods, PyReadonlyArray};
 use pyo3::prelude::PyAnyMethods;
 use pyo3::types::PyDict;
 use pyo3::{Bound, PyAny, PyErr, Python};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use num_traits::{One, ToPrimitive, Zero};
 use tracing::debug;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ArrayStorage<'py, T: Element, D: Dimension> {
     Python(PyReadonlyArray<'py, T, D>),
     Rust(Array<T, D>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(from = "SerializableSet<DF, DT, T>")]
+#[serde(into = "SerializableSet<DF, DT, T>")]
+#[serde(bound(serialize = "T: Clone + Serialize, DF: Serialize, DT: Serialize"))]
 pub struct Set<'py, DF: Dimension, DT: Dimension, T: Element> {
     name: String,
     features: ArrayStorage<'py, T, DF>,
     targets: ArrayStorage<'py, T, DT>,
+    num_rows: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SerializableSet<DF: Dimension, DT: Dimension, T: Element> {
+    name: String,
+    features: Array<T, DF>,
+    targets: Array<T, DT>,
     num_rows: usize,
 }
 
@@ -35,6 +49,34 @@ struct Dataset<'py> {
     num_rows: usize,
 }
 
+impl<DF: Dimension, DT: Dimension, T: Element> From<SerializableSet<DF, DT, T>>
+    for Set<'static, DF, DT, T>
+{
+    fn from(value: SerializableSet<DF, DT, T>) -> Self {
+        Self {
+            name: value.name,
+            features: ArrayStorage::Rust(value.features),
+            targets: ArrayStorage::Rust(value.targets),
+            num_rows: value.num_rows,
+        }
+    }
+}
+
+impl<'a, DF: Dimension, DT: Dimension, T: Element> From<Set<'a, DF, DT, T>>
+    for SerializableSet<DF, DT, T>
+where
+    T: Clone,
+{
+    fn from(value: Set<'a, DF, DT, T>) -> Self {
+        Self {
+            name: value.name,
+            features: value.features.view().to_owned(),
+            targets: value.targets.view().to_owned(),
+            num_rows: value.num_rows,
+        }
+    }
+}
+
 impl<'a, T: Element> Mnist<'a, T> {
     pub fn train(&self) -> &MnistSet<'a, T> {
         &self.train_set
@@ -44,16 +86,14 @@ impl<'a, T: Element> Mnist<'a, T> {
         &self.test_set
     }
 
-    pub fn features_flattened(set: ArrayView3<'_, T>) -> ArrayView2<'_, T, > {
+    pub fn features_flattened(set: ArrayView3<'_, T>) -> ArrayView2<'_, T> {
         let length = set.dim().0;
-        set
-            .into_shape_with_order((length, 28 * 28))
-            .unwrap()
+        set.into_shape_with_order((length, 28 * 28)).unwrap()
     }
 
     pub fn targets_unrolled(set: ArrayView1<'_, T>) -> Array2<T>
     where
-        T: Zero + Clone + ToPrimitive + One
+        T: Zero + Clone + ToPrimitive + One,
     {
         let length = set.dim();
         let mut result = Array2::zeros((length, 10));
@@ -75,6 +115,16 @@ impl<'a, T: Element> Mnist<'a, T> {
         }
     }
 
+    pub fn from_parts(
+        train_set: MnistSet<'a, T>,
+        test_set: MnistSet<'a, T>
+    ) -> Self {
+        Self {
+            train_set,
+            test_set
+        }
+    }
+    
     pub fn load(path: impl AsRef<Path>) -> Result<Mnist<'static, T>, PyErr>
     where
         T: Clone,
