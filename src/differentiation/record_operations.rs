@@ -1,5 +1,4 @@
 use crate::differentiation::{Record, WengertList};
-use ndarray::ScalarOperand;
 use num_traits::real::Real;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;

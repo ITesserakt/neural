@@ -4,11 +4,10 @@ use ndarray::Dimension;
 use numpy::Element;
 use pyo3::{PyErr, Python};
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use serde::Serialize;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::fs::{create_dir_all, DirEntry, File};
+use std::fs::{create_dir_all, File};
 use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
 use tracing::debug;
@@ -17,8 +16,14 @@ use tracing::debug;
 pub struct Config {
     #[arg(long, required = true)]
     dataset_path: PathBuf,
-    #[arg(long = "cache", default_value = ".cache")]
+    #[arg(long, default_value = ".cache")]
     cache_path: PathBuf,
+    #[arg(short, long, default_value_t = 20)]
+    pub epoches: usize,
+    #[arg(short, long, default_value_t = 256)]
+    pub batch_size: usize,
+    #[arg(short, long, default_value_t = 1e-1)]
+    pub learning_rate: f64,
 }
 
 type SerializationError = postcard::Error;

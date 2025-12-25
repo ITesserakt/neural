@@ -1,15 +1,14 @@
-use crate::differentiation::{Record, WengertList};
+use crate::differentiation::{FrozenRecord, Record, WengertList};
 use crate::function_v2::{ArrayFunction, Exp, Linear, OnceDifferentiableFunction};
-use crate::network::hacks::NetworkData;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, LinalgScalar, Zip};
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
 use ndarray_rand::rand_distr::{Distribution, Normal, StandardNormal};
 use ndarray_rand::RandomExt;
-use num_traits::{Float, Zero};
+use num_traits::{Float, NumCast, One, Zero};
 use smallvec::SmallVec;
-use std::fmt::Debug;
-use std::ops::{AddAssign, Deref, DerefMut, Neg, SubAssign};
+use std::fmt::{Debug};
+use std::ops::{AddAssign, Deref, DerefMut, Neg};
 
 #[derive(Debug, Clone)]
 struct Parameters<T> {
@@ -22,6 +21,7 @@ struct Layer<T: 'static> {
     activation: OnceDifferentiableFunction<T>,
     size: usize,
     parameters: Parameters<T>,
+    gradients: Parameters<T>,
 }
 
 const INLINE_LAYER_BUFFER_SIZE: usize = 3;
@@ -33,34 +33,28 @@ pub struct Ready<F> {
     output: F,
 }
 
-mod hacks {
-    use crate::differentiation::WengertList;
-    use crate::network::{Layer, INLINE_LAYER_BUFFER_SIZE};
-    use smallvec::SmallVec;
+pub(super) struct NetworkData<T: 'static> {
+    pub(super) tape: &'static WengertList<T>,
+    layers: SmallVec<[Layer<T>; INLINE_LAYER_BUFFER_SIZE]>,
+}
 
-    pub(super) struct NetworkData<T: 'static> {
-        pub(super) tape: &'static WengertList<T>,
-        layers: SmallVec<[Layer<T>; INLINE_LAYER_BUFFER_SIZE]>,
+impl<T> NetworkData<T> {
+    fn layers(&self) -> &[Layer<T>] {
+        self.layers.as_ref()
     }
 
-    impl<T> NetworkData<T> {
-        pub(super) fn layers(&self) -> &[Layer<T>] {
-            self.layers.as_ref()
-        }
+    fn layers_mut(&mut self) -> &mut [Layer<T>] {
+        self.layers.as_mut()
+    }
 
-        pub(super) fn layers_mut(&mut self) -> &mut [Layer<T>] {
-            self.layers.as_mut()
-        }
+    fn push_layer(&mut self, value: Layer<T>) {
+        self.layers.push(value);
+    }
 
-        pub(super) fn push_layer(&mut self, value: Layer<T>) {
-            self.layers.push(value);
-        }
-
-        pub(super) fn empty() -> Self {
-            Self {
-                tape: WengertList::leak(),
-                layers: SmallVec::new(),
-            }
+    fn empty() -> Self {
+        Self {
+            tape: WengertList::leak(),
+            layers: SmallVec::new(),
         }
     }
 }
@@ -87,6 +81,42 @@ impl<T> Parameters<T> {
         Parameters {
             weights: self.weights.mapv(&f),
             biases: self.biases.mapv(f),
+        }
+    }
+
+    fn zeros(output_size: usize, input_size: usize) -> Self
+    where
+        T: Zero + Clone,
+    {
+        Self {
+            weights: Array2::zeros((output_size, input_size)),
+            biases: Array1::zeros(output_size),
+        }
+    }
+
+    fn random(output_size: usize, input_size: usize, rng: &mut impl Rng) -> Self
+    where
+        T: Zero + One + NumCast + Float,
+        StandardNormal: Distribution<T>,
+    {
+        let normal = Normal::new(T::zero(), T::one()).unwrap();
+        let w = T::from(2.0 / (output_size + input_size) as f64)
+            .unwrap()
+            .sqrt();
+        let b = T::from(2.0 / output_size as f64).unwrap().sqrt();
+
+        Self {
+            weights: Array2::random_using((output_size, input_size), normal.map(|it| it * w), rng),
+            biases: Array1::random_using(output_size, normal.map(|it| it * b), rng),
+        }
+    }
+}
+
+impl<T> Parameters<Record<'_, T>> {
+    fn freeze(self) -> Parameters<FrozenRecord<T>> {
+        Parameters {
+            weights: unsafe { std::mem::transmute(self.weights) },
+            biases: unsafe { std::mem::transmute(self.biases) },
         }
     }
 }
@@ -125,6 +155,7 @@ impl<T> Network<T, Hidden<StdRng>> {
 }
 
 impl<T, R> Network<T, Hidden<R>> {
+    #[allow(dead_code)]
     pub fn with_seed(input_size: usize, seed: u64) -> Self
     where
         R: SeedableRng,
@@ -149,26 +180,17 @@ impl<T, R> Network<T, Hidden<R>> {
         T: Float,
         StandardNormal: Distribution<T>,
     {
-        let normal = Normal::new(T::zero(), T::one()).unwrap();
         let previous_size = self
             .inner
             .layers()
             .last()
             .map_or(self.input_size, |it| it.size);
 
-        let w = T::from(2.0 / (size + previous_size) as f64).unwrap().sqrt();
-        let weights = Array2::random_using(
-            (size, previous_size),
-            normal.map(|x| x * w),
-            &mut self.state.rng,
-        );
-        let b = T::from(2.0 / size as f64).unwrap().sqrt();
-        let biases = Array1::random_using(size, normal.map(|x| x * b), &mut self.state.rng);
-
         let layer = Layer {
             activation,
             size,
-            parameters: Parameters { weights, biases },
+            parameters: Parameters::random(size, previous_size, &mut self.state.rng),
+            gradients: Parameters::zeros(size, previous_size),
         };
         self.inner.push_layer(layer);
 
@@ -209,6 +231,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     pub fn predict<'a>(&self, input: impl Into<CowArray<'a, T, Ix1>>) -> Array1<T>
     where
         T: LinalgScalar + Neg<Output = T> + Exp,
@@ -266,12 +289,18 @@ where
         loss: impl Fn(Array1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
     ) -> Array1<T>
     where
-        T: LinalgScalar + Neg<Output = T> + SubAssign + Float,
-        T: Debug,
+        T: LinalgScalar + Neg<Output = T> + AddAssign + Float,
+        T: Send + Sync,
     {
-        assert_eq!(batched_input.nrows(), batched_target.nrows());
+        debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
+        let mut gradients = self
+            .inner
+            .layers()
+            .into_iter()
+            .map(|it| it.gradients.clone())
+            .collect::<SmallVec<[_; INLINE_LAYER_BUFFER_SIZE]>>();
 
-        Zip::from(batched_input.rows())
+        let loss = Zip::from(batched_input.rows())
             .and(batched_target.rows())
             .map_collect(|x, y| {
                 let (fs, ps) = self
@@ -292,30 +321,42 @@ where
                 let loss_value = loss(y_pred, y);
 
                 let ds = loss_value.derivatives();
-                for (layer, p) in self.inner.layers_mut().into_iter().zip(ps) {
-                    Zip::from(&mut layer.weights)
-                        .and(&p.weights)
-                        .for_each(|w, pw| *w -= learning_rate * ds[pw]);
+                for (g, p) in gradients.iter_mut().zip(ps) {
+                    let p = p.freeze();
 
-                    Zip::from(&mut layer.biases)
+                    Zip::from(&mut g.weights)
+                        .and(&p.weights)
+                        .for_each(|w, pw| *w += ds[pw]);
+
+                    Zip::from(&mut g.biases)
                         .and(&p.biases)
-                        .for_each(|b, pb| *b -= learning_rate * ds[pb]);
+                        .for_each(|b, pb| *b += ds[pb]);
                 }
                 self.inner.tape.clear();
 
                 loss_value.number
-            })
+            });
+
+        let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
+        for (layer, g) in self.inner.layers_mut().iter_mut().zip(gradients) {
+            layer.weights.scaled_add(factor, &g.weights);
+            layer.biases.scaled_add(factor, &g.biases);
+        }
+
+        loss
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
-    use crate::differentiation::Record;
-    use crate::network::{Hidden, Network};
-    use ndarray::{array, Array1, ArrayView1, Zip};
-    use ndarray_linalg::aclose;
+    use crate::differentiation::{Record, WengertList};
+    use crate::function_v2::Linear;
+    use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
+    use ndarray::{array, Array1, Array2, ArrayView1, Zip};
+    use ndarray_linalg::{aclose, assert_aclose};
     use ndarray_rand::rand::prelude::StdRng;
+    use smallvec::smallvec;
 
     #[test]
     fn test_network_prediction() {
@@ -333,17 +374,16 @@ mod tests {
         aclose(d[(0, 2)], c[0], 1e-15);
     }
 
+    fn sse<'a>(yp: Array1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
+        Zip::from(&yp)
+            .and(&yr)
+            .fold(Record::constant(0.0), |acc, &yp, &yr| {
+                acc + (yp - Record::constant(yr)) * (yp - Record::constant(yr))
+            })
+    }
+
     #[test]
     fn test_network_learning() {
-        fn sse<'a>(yp: Array1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
-            Zip::from(&yp)
-                .and(&yr)
-                .fold(Record::constant(0.0), |acc, &yp, &yr| {
-                    acc + Record::constant(0.5)
-                        * (yp - Record::constant(yr)).unary(|x| x.powi(2), |x| 2.0 * x)
-                })
-        }
-
         let mut network = Network::<_, Hidden<StdRng>>::with_seed(2, 0)
             .push_hidden_layer(2, relu_fn())
             .push_output_layer(1, linear_fn());
@@ -357,7 +397,7 @@ mod tests {
         ];
         let ys = array![[3.0], [1.2], [1.0], [2.5], [0.08]];
 
-        for _ in 0..300 {
+        for _ in 0..900 {
             println!(
                 "{:.3}\t\t{:.3}",
                 network.learn(xs.view(), ys.view(), 1e-1, sse),
@@ -367,5 +407,67 @@ mod tests {
 
         let prediction = network.predict(array![0.1, 0.2]);
         aclose(prediction[0], 0.3, 1e-9);
+    }
+
+    #[test]
+    fn test_network_epoches() {
+        let mut network = Network {
+            inner: NetworkData {
+                tape: WengertList::leak(),
+                layers: smallvec![
+                    Layer {
+                        size: 2,
+                        activation: sigmoid_fn(),
+                        parameters: Parameters {
+                            weights: Array2::ones((2, 2)),
+                            biases: Array1::zeros(2),
+                        },
+                        gradients: Parameters::zeros(2, 2)
+                    },
+                    Layer {
+                        size: 1,
+                        activation: linear_fn(),
+                        parameters: Parameters {
+                            weights: Array2::ones((1, 2)),
+                            biases: Array1::zeros(1),
+                        },
+                        gradients: Parameters::zeros(1, 2)
+                    }
+                ],
+            },
+            input_size: 2,
+            state: Ready { output: Linear },
+        };
+
+        let xs = array![[0.0, 0.0], [1.0, 1.0]];
+        let ys = array![[0.0], [1.0]];
+
+        let y_pred = network.predict_many(xs.view()).reversed_axes();
+        let loss_before = Zip::from(y_pred.rows())
+            .and(ys.rows())
+            .map_collect(|yp, yr| sse(yp.mapv(Record::constant), yr).number);
+        assert_aclose!(loss_before[0], 1.0, 1e-15);
+        assert_aclose!(loss_before[1], 0.5800256583859735, 1e-15);
+
+        let loss_after = network.learn(xs.view(), ys.view(), 0.1, sse);
+        assert_eq!(
+            network.inner.layers[0].weights,
+            array![
+                [0.9920037498943847, 0.9920037498943847],
+                [0.9920037498943847, 0.9920037498943847]
+            ]
+        );
+        assert_eq!(
+            network.inner.layers[0].biases,
+            array![-0.03299625010561531, -0.03299625010561531]
+        );
+        assert_eq!(
+            network.inner.layers[1].weights,
+            array![[0.8829190092829131, 0.8829190092829131]]
+        );
+        assert_eq!(network.inner.layers[1].biases, array![-0.17615941559557646]);
+
+        assert_aclose!(loss_after[0], 1.0, 1e-15);
+        assert_aclose!(loss_after[1], 0.5800256583859735, 1e-15);
     }
 }

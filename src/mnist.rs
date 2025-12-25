@@ -124,19 +124,6 @@ impl<'a, T: Element> Mnist<'a, T> {
             test_set
         }
     }
-    
-    pub fn load(path: impl AsRef<Path>) -> Result<Mnist<'static, T>, PyErr>
-    where
-        T: Clone,
-    {
-        Python::initialize();
-        let mnist = Python::attach(|py| {
-            let dataset = Datasets::new(py, path)?;
-            Ok::<_, PyErr>(dataset.load_as_mnist()?.to_owned())
-        })?;
-
-        Ok(mnist)
-    }
 }
 
 impl<'py, T: Element, D: Dimension> ArrayStorage<'py, T, D> {

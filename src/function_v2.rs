@@ -1,7 +1,9 @@
-use ndarray::{Array, ArrayViewMut, Dimension, LinalgScalar};
+#![allow(dead_code)]
+
+use crate::differentiation::Record;
+use ndarray::{ArrayViewMut, Dimension, LinalgScalar};
 use num_traits::{Float, Zero};
 use std::sync::Arc;
-use crate::differentiation::Record;
 
 enum Storage<T: ?Sized + 'static> {
     Boxed(Arc<T>),
@@ -45,8 +47,7 @@ impl<D: Dimension> ArrayFunction<D> for Softmax {
 }
 
 impl<D: Dimension> ArrayFunction<D> for Linear {
-    fn call<T>(&self, _: ArrayViewMut<T, D>) {
-    }
+    fn call<T>(&self, _: ArrayViewMut<T, D>) {}
 }
 
 impl<T: ?Sized + 'static> Clone for Storage<T> {

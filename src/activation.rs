@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::function_v2::OnceDifferentiableFunction;
 use num_traits::{Float, One};
 

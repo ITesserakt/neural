@@ -1,4 +1,5 @@
-#![allow(clippy::double_parens)]
+#![allow(dead_code)]
+
 /*!
  * ORIGINAL CODE BELONGS TO: easy-ml: https://github.com/Skeletonxf/easy-ml/blob/master/src/differentiation.rs
  * (Automatic) Differentiation helpers
@@ -80,7 +81,7 @@
  */
 
 use ndarray::{Array1, ArrayBase, ArrayView1, Data, Ix1};
-use num_traits::{ConstOne, ConstZero, One, Zero};
+use num_traits::{ConstOne, ConstZero, One, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
@@ -315,7 +316,7 @@ where
 /**
  * WengertLists are indexed with [`usize`].
  */
-pub type Index = usize;
+pub type Index = u32;
 
 /**
  * A list of operations performed in a forward pass of a dynamic computational graph,
@@ -408,8 +409,20 @@ impl<T: Clone> Derivatives<T> {
      * If you construct a Derivatives object for some output y,
      * and call .at(&x) on it for some input x, this returns dy/dx.
      */
-    pub fn at(&self, input: &Record<T>) -> T {
-        self.derivatives[input.index].clone()
+    #[inline(always)]
+    fn at(&self, index: impl ToPrimitive) -> T {
+        self.derivatives[index.to_usize().unwrap()].clone()
+    }
+
+    #[inline(always)]
+    fn at_mut(&mut self, index: impl ToPrimitive) -> &mut T {
+        &mut self.derivatives[index.to_usize().unwrap()]
+    }
+}
+
+impl<T: Zero + Clone> Derivatives<T> {
+    fn empty(size: usize) -> Self {
+        Self { derivatives: vec![T::zero(); size] }
     }
 }
 
@@ -422,7 +435,15 @@ impl<'a, T> std::ops::Index<&Record<'a, T>> for Derivatives<T> {
      * and call .at(&x) on it for some input x, this returns dy/dx.
      */
     fn index(&self, input: &Record<'a, T>) -> &Self::Output {
-        &self.derivatives[input.index]
+        &self.derivatives[input.index as usize]
+    }
+}
+
+impl<T> std::ops::Index<&FrozenRecord<T>> for Derivatives<T> {
+    type Output = T;
+
+    fn index(&self, input: &FrozenRecord<T>) -> &Self::Output {
+        &self.derivatives[input.index as usize]
     }
 }
 
@@ -494,6 +515,13 @@ pub struct Record<'a, T> {
      * In normal use cases you should not need to read this field,
      * you can index [Derivatives] directly with Records.
      */
+    pub index: Index,
+}
+
+#[derive(Debug)]
+pub struct FrozenRecord<T: 'static> {
+    pub number: T,
+    _history: Option<&'static ()>,
     pub index: Index,
 }
 
@@ -616,6 +644,14 @@ impl<'a, T> Record<'a, T> {
     pub fn history(&self) -> Option<&'a WengertList<T>> {
         self.history
     }
+
+    pub fn freeze(self) -> FrozenRecord<T> {
+        FrozenRecord {
+            number: self.number,
+            _history: None,
+            index: self.index,
+        }
+    }
 }
 
 impl<'a, T> Record<'a, T> {
@@ -660,27 +696,27 @@ impl<'a, T> Record<'a, T> {
         let history = self.history?;
         let operations = history.operations.borrow();
 
-        let mut derivatives = vec![T::zero(); operations.len()];
+        let mut derivatives = Derivatives::empty(operations.len());
 
         // δy/δy = 1
-        derivatives[self.index] = T::one();
+        *derivatives.at_mut(self.index) = T::one();
 
         // Go back up the computation graph to the inputs
         for i in (0..operations.len()).rev() {
             let operation = operations[i].clone();
-            let derivative = derivatives[i].clone();
+            let derivative = derivatives.at(i);
             // The chain rule allows breaking up the derivative of the output y
             // with respect to the input x into many smaller derivatives that
             // are summed together.
             // δy/δx = δy/δw * δw/δx
             // δy/δx = sum for all i parents of y ( δy/δw_i * δw_i/δx )
-            derivatives[operation.left_parent] = derivatives[operation.left_parent].clone()
+            *derivatives.at_mut(operation.left_parent) = derivatives.at(operation.left_parent)
                 + derivative.clone() * operation.left_derivative;
-            derivatives[operation.right_parent] = derivatives[operation.right_parent].clone()
+            *derivatives.at_mut(operation.right_parent) = derivatives.at(operation.right_parent)
                 + derivative * operation.right_derivative;
         }
 
-        Some(Derivatives { derivatives })
+        Some(derivatives)
     }
 }
 
@@ -694,7 +730,7 @@ impl<T> WengertList<T> {
     /**
      * Creates a new empty WengertList from which Records can be constructed.
      */
-    pub fn new() -> WengertList<T> {
+    pub const fn new() -> WengertList<T> {
         WengertList {
             operations: RefCell::new(Vec::new()),
         }
@@ -764,9 +800,9 @@ impl<T> WengertList<T> {
     {
         let mut operations = self.operations.borrow_mut();
         // insert into end of list
-        let starting_index = operations.len();
+        let starting_index = operations.len() as Index;
         for i in 0..values {
-            let index = starting_index.saturating_add(i);
+            let index = starting_index + i as Index;
             operations.push(Operation {
                 // this index of the child is used for both indexes as these
                 // won't be needed but will always be valid (ie point to a
@@ -872,7 +908,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
         T: Zero,
     {
         // insert into end of list
-        let index = self.operations.len();
+        let index = self.operations.len() as Index;
         self.operations.push(Operation {
             // this index of the child is used for both indexes as these
             // won't be needed but will always be valid (ie point to a
@@ -900,7 +936,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
         T: Zero,
     {
         // insert into end of list
-        let index = self.operations.len();
+        let index = self.operations.len() as Index;
         self.operations.push(Operation {
             left_parent: parent,
             // this index of the child is used as this index won't be needed
@@ -932,7 +968,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
         right_derivative: T,
     ) -> Index {
         // insert into end of list
-        let index = self.operations.len();
+        let index = self.operations.len() as Index;
         self.operations.push(Operation {
             left_parent,
             right_parent,
@@ -1074,14 +1110,19 @@ fn test_record_derivatives_when_no_history() {
 fn test_sync() {
     fn assert_sync<T: Sync>() {}
     assert_sync::<Trace<f64>>();
+    assert_sync::<FrozenRecord<f64>>();
 }
 
 #[test]
 fn test_send() {
     fn assert_send<T: Send>() {}
     assert_send::<Trace<f64>>();
+    assert_send::<FrozenRecord<f64>>();
 }
 
 const _: () = {
     assert!(size_of::<Record<f64>>() == 24);
+    assert!(size_of::<FrozenRecord<f64>>() == 24);
+    assert!(align_of::<Record<f64>>() == 8);
+    assert!(align_of::<FrozenRecord<f64>>() == 8);
 };

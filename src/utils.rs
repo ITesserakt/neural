@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use ndarray::{Array, ArrayBase, Axis, DataShared, Ix, RemoveAxis, Zip};
 use ndarray_rand::rand::{rng, Rng};
 use ndarray_rand::rand::prelude::SliceRandom;

@@ -1,27 +1,27 @@
 use crate::activation::{linear_fn, sigmoid_fn};
+use crate::config::Config;
 use crate::differentiation::Record;
 use crate::function_v2::Softmax;
 use crate::mnist::Mnist;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
+use clap::Parser;
 use ndarray::{ArrayBase, ArrayView1, Axis, Data, Ix1, Zip};
 use num_traits::{Float, One, Zero};
 use progressing::Baring;
 use std::error::Error;
 use std::io::Write;
 use std::ops::DivAssign;
-use clap::Parser;
-use tracing::{Level};
-use crate::config::Config;
+use tracing::Level;
 
 mod activation;
 mod differentiation;
 // mod function;
+mod config;
 mod function_v2;
 mod mnist;
 mod network;
 mod utils;
-mod config;
 
 fn cross_entropy<'a, T>(
     yp: ArrayBase<impl Data<Elem: Into<Record<'a, T>> + Clone>, Ix1>,
@@ -50,7 +50,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mnist = config.load_mnist_dataset()?;
 
     let mut network = Network::new(28 * 28)
-        .push_hidden_layer(32, sigmoid_fn())
+        .push_hidden_layer(128, sigmoid_fn())
+        .push_hidden_layer(64, sigmoid_fn())
         .push_output_layer(10, linear_fn())
         .map_output(Softmax);
 
@@ -60,34 +61,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let test_xs = Mnist::features_flattened(mnist.test().features());
     let test_ys = Mnist::targets_unrolled(mnist.test().targets());
 
-    let batch_size = 100;
-    let epoches = 20;
     let mut p =
-        progressing::mapping::Bar::with_range(0, train_length / batch_size * epoches).timed();
+        progressing::mapping::Bar::with_range(0, train_length / config.batch_size * config.epoches)
+            .timed();
     p.set_len(45);
 
-    for epoch in 0..epoches {
+    for epoch in 0..config.epoches {
         let permutation = Permutation::random(train_length);
         let train_xs = train_xs.permute_axis(Axis(0), &permutation);
         let train_ys = train_ys.view().permute_axis(Axis(0), &permutation);
 
         for (i, (xs, ys)) in train_xs
-            .axis_chunks_iter(Axis(0), batch_size)
-            .zip(train_ys.axis_chunks_iter(Axis(0), batch_size))
+            .axis_chunks_iter(Axis(0), config.batch_size)
+            .zip(train_ys.axis_chunks_iter(Axis(0), config.batch_size))
             .enumerate()
         {
-            let loss = network.learn(xs, ys, 1e-3, cross_entropy);
+            let loss = network.learn(xs, ys, config.learning_rate, cross_entropy);
 
-            p.set(epoch * (train_length / batch_size) + i);
+            p.set(epoch * (train_length / config.batch_size) + i);
             print!("{p:<50}{:^10.3?}\r", loss.mean().unwrap());
-            std::io::stdout().flush().unwrap();
+            std::io::stdout().flush()?;
         }
 
         let predicted = network.predict_many(test_xs).reversed_axes();
         let error = Zip::from(predicted.rows())
             .and(test_ys.rows())
             .par_map_collect(|yp, yr| cross_entropy(yp, yr).number)
-            .mean();
+            .sum();
         println!("{:.3}", predicted.row(0));
         println!("{:.3}", test_ys.row(0));
         println!("{error:<50?}");
