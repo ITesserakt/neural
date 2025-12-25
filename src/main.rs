@@ -1,29 +1,42 @@
 use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
+use crate::differentiation::Record;
+use crate::function_v2::Softmax;
 use crate::mnist::Mnist;
 use crate::network::Network;
-use ndarray::{Array1, ArrayView1, Axis, Slice, Zip};
+use crate::utils::{Permutation, PermuteArray};
+use ndarray::{ArrayBase, ArrayView1, Axis, Data, Ix1, Zip};
+use num_traits::{Float, One, Zero};
 use progressing::Baring;
 use std::env::args;
 use std::io::Write;
-use num_traits::Float;
+use std::ops::DivAssign;
 use tracing::{info, Level};
-use crate::utils::{Permutation, PermuteArray};
 
 mod activation;
 mod differentiation;
-mod function;
+// mod function;
+mod function_v2;
 mod mnist;
 mod network;
 mod utils;
 
-enum Commands {
-
-}
-
-fn cross_entropy<T: Float + 'static>(yp: ArrayView1<T>, yr: ArrayView1<T>) -> T {
-    Zip::from(&yp).and(&yr).fold(T::zero(), |acc, yp, yr| {
-        acc - *yr * (*yp + T::epsilon()).ln()
-    })
+fn cross_entropy<'a, T>(
+    yp: ArrayBase<impl Data<Elem: Into<Record<'a, T>> + Clone>, Ix1>,
+    yr: ArrayView1<T>,
+) -> Record<'a, T>
+where
+    T: Copy + Float + DivAssign + One,
+{
+    let yp = yp.mapv(|x| x.into());
+    -Zip::from(&yp)
+        .and(&yr)
+        .fold(Record::zero(), |acc, yp, &yr| {
+            acc + Record::constant(yr)
+                * yp.unary(
+                    |x| (x + T::epsilon()).ln(),
+                    |x| T::one() / (x + T::epsilon()),
+                )
+        })
 }
 
 fn main() {
@@ -51,7 +64,8 @@ fn main() {
 
     let mut network = Network::new(28 * 28)
         .push_hidden_layer(32, sigmoid_fn())
-        .push_output_layer(10, linear_fn());
+        .push_output_layer(10, linear_fn())
+        .map_output(Softmax);
 
     let train_length = mnist.train().length();
     let train_xs = Mnist::features_flattened(mnist.train().features());
@@ -59,9 +73,10 @@ fn main() {
     let test_xs = Mnist::features_flattened(mnist.test().features());
     let test_ys = Mnist::targets_unrolled(mnist.test().targets());
 
-    let batch_size = 1000;
+    let batch_size = 100;
     let epoches = 20;
-    let mut p = progressing::mapping::Bar::with_range(0, train_length / batch_size * epoches).timed();
+    let mut p =
+        progressing::mapping::Bar::with_range(0, train_length / batch_size * epoches).timed();
     p.set_len(45);
 
     for epoch in 0..epoches {
@@ -74,22 +89,17 @@ fn main() {
             .zip(train_ys.axis_chunks_iter(Axis(0), batch_size))
             .enumerate()
         {
-            network.learn(xs, ys, 1e-5);
+            let loss = network.learn(xs, ys, 1e-3, cross_entropy);
 
             p.set(epoch * (train_length / batch_size) + i);
-            print!("{p:<50}\r");
+            print!("{p:<50}{:^10.3?}\r", loss.mean().unwrap());
             std::io::stdout().flush().unwrap();
         }
 
-        let mut predicted = network.predict_many(test_xs).reversed_axes();
-        Zip::from(predicted.rows_mut()).par_for_each(|mut row| {
-            row.mapv_inplace(f64::exp);
-            let sum = row.sum();
-            row /= sum;
-        });
+        let predicted = network.predict_many(test_xs).reversed_axes();
         let error = Zip::from(predicted.rows())
             .and(test_ys.rows())
-            .par_map_collect(cross_entropy)
+            .par_map_collect(|yp, yr| cross_entropy(yp, yr).number)
             .mean();
         println!("{:.3}", predicted.row(0));
         println!("{:.3}", test_ys.row(0));

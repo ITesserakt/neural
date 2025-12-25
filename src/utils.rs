@@ -1,6 +1,5 @@
-use ndarray::{Array, ArrayBase, Axis, Data, DataShared, Ix, RemoveAxis, Zip};
+use ndarray::{Array, ArrayBase, Axis, DataShared, Ix, RemoveAxis, Zip};
 use ndarray_rand::rand::{rng, Rng};
-use std::ptr::copy_nonoverlapping;
 use ndarray_rand::rand::prelude::SliceRandom;
 
 pub struct Permutation {
@@ -91,6 +90,7 @@ mod tests {
     use crate::utils::{Permutation, PermuteArray};
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn test_random_permutation() {
         for _ in 0..1_000_000 {
             let perm = Permutation::random(10);
@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn test_array_permutation() {
-        let array = Array3::<f32>::random((100, 200, 30), StandardNormal);
-        let perm = Permutation::ordered(200);
+        let array = Array3::<f32>::random((10, 20, 30), StandardNormal);
+        let perm = Permutation::ordered(20);
 
         let result = array.view().permute_axis(Axis(1), &perm);
         assert_eq!(result, array);

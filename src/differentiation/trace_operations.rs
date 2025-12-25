@@ -35,13 +35,9 @@
 
 use crate::differentiation::Trace;
 use ndarray::ScalarOperand;
-use ndarray_rand::rand::Rng;
-use ndarray_rand::rand_distr::{Distribution, StandardNormal};
-use num_traits::float::FloatCore;
 use num_traits::real::Real;
-use num_traits::{ConstOne, ConstZero, Float, Num, NumCast, One, ToPrimitive, Zero};
+use num_traits::{ConstOne, ConstZero, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
-use std::num::FpCategory;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
 /**
@@ -50,17 +46,6 @@ use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 impl<T: std::fmt::Display> std::fmt::Display for Trace<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.number)
-    }
-}
-
-impl<T> Distribution<Trace<T>> for StandardNormal
-where
-    Self: Distribution<T>,
-    T: ConstZero,
-{
-    #[inline]
-    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Trace<T> {
-        Trace::constant(<Self as Distribution<T>>::sample(self, rng))
     }
 }
 
@@ -237,491 +222,13 @@ impl<T: Neg<Output = T>> Neg for Trace<T> {
     }
 }
 
-impl<T: Real + FloatCore + ConstZero + ConstOne> FloatCore for Trace<T> {
-    #[inline(always)]
-    fn infinity() -> Self {
-        Trace::constant(T::infinity())
-    }
-
-    #[inline(always)]
-    fn neg_infinity() -> Self {
-        Trace::constant(T::neg_infinity())
-    }
-
-    #[inline(always)]
-    fn nan() -> Self {
-        Trace::constant(T::nan())
-    }
-
-    #[inline(always)]
-    fn neg_zero() -> Self {
-        Trace::constant(T::neg_zero())
-    }
-
-    #[inline(always)]
-    fn min_value() -> Self {
-        Trace::constant(FloatCore::min_value())
-    }
-
-    #[inline(always)]
-    fn min_positive_value() -> Self {
-        Trace::constant(FloatCore::min_positive_value())
-    }
-
-    #[inline(always)]
-    fn epsilon() -> Self {
-        Trace::constant(FloatCore::epsilon())
-    }
-
-    #[inline(always)]
-    fn max_value() -> Self {
-        Trace::constant(FloatCore::max_value())
-    }
-
-    #[inline(always)]
-    fn is_nan(self) -> bool {
-        FloatCore::is_nan(self.number)
-    }
-
-    #[inline(always)]
-    fn is_infinite(self) -> bool {
-        FloatCore::is_infinite(self.number)
-    }
-
-    #[inline(always)]
-    fn is_finite(self) -> bool {
-        FloatCore::is_finite(self.number)
-    }
-
-    #[inline(always)]
-    fn is_normal(self) -> bool {
-        FloatCore::is_normal(self.number)
-    }
-
-    #[inline(always)]
-    fn is_subnormal(self) -> bool {
-        FloatCore::is_subnormal(self.number)
-    }
-
-    #[inline(always)]
-    fn classify(self) -> FpCategory {
-        self.number.classify()
-    }
-
-    #[inline(always)]
-    fn floor(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn ceil(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn round(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn trunc(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn fract(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn abs(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn signum(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn is_sign_positive(self) -> bool {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn is_sign_negative(self) -> bool {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn min(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn max(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn clamp(self, min: Self, max: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn recip(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn powi(self, exp: i32) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn to_degrees(self) -> Self {
-        Trace::constant(FloatCore::to_degrees(self.number))
-    }
-
-    #[inline(always)]
-    fn to_radians(self) -> Self {
-        Trace::constant(FloatCore::to_radians(self.number))
-    }
-
-    #[inline(always)]
-    fn integer_decode(self) -> (u64, i16, i8) {
-        self.number.integer_decode()
-    }
-}
-
-impl<T: Float + ConstZero + ConstOne> Float for Trace<T> {
-    #[inline(always)]
-    fn nan() -> Self {
-        Trace::constant(Float::nan())
-    }
-
-    #[inline(always)]
-    fn infinity() -> Self {
-        Trace::constant(Float::infinity())
-    }
-
-    #[inline(always)]
-    fn neg_infinity() -> Self {
-        Trace::constant(Float::neg_infinity())
-    }
-
-    #[inline(always)]
-    fn neg_zero() -> Self {
-        Trace::constant(Float::neg_zero())
-    }
-
-    #[inline(always)]
-    fn min_value() -> Self {
-        Trace::constant(Float::min_value())
-    }
-
-    #[inline(always)]
-    fn min_positive_value() -> Self {
-        Trace::constant(Float::min_positive_value())
-    }
-
-    #[inline(always)]
-    fn max_value() -> Self {
-        Trace::constant(Float::max_value())
-    }
-
-    #[inline(always)]
-    fn is_nan(self) -> bool {
-        Float::is_nan(self.number)
-    }
-
-    #[inline(always)]
-    fn is_infinite(self) -> bool {
-        Float::is_infinite(self.number)
-    }
-
-    #[inline(always)]
-    fn is_finite(self) -> bool {
-        Float::is_finite(self.number)
-    }
-
-    #[inline(always)]
-    fn is_normal(self) -> bool {
-        Float::is_normal(self.number)
-    }
-
-    #[inline(always)]
-    fn classify(self) -> FpCategory {
-        Float::classify(self.number)
-    }
-
-    #[inline(always)]
-    fn floor(self) -> Self {
-        Trace::constant(Float::floor(self.number))
-    }
-
-    #[inline(always)]
-    fn ceil(self) -> Self {
-        Trace::constant(Float::ceil(self.number))
-    }
-
-    #[inline(always)]
-    fn round(self) -> Self {
-        Trace::constant(Float::round(self.number))
-    }
-
-    #[inline(always)]
-    fn trunc(self) -> Self {
-        Trace::constant(Float::trunc(self.number))
-    }
-
-    #[inline(always)]
-    fn fract(self) -> Self {
-        Trace::variable(Float::fract(self.number))
-    }
-
-    #[inline(always)]
-    fn abs(self) -> Self {
-        Trace {
-            number: Float::abs(self.number),
-            derivative: Float::signum(self.number) * self.derivative,
-        }
-    }
-
-    #[inline(always)]
-    fn signum(self) -> Self {
-        Trace {
-            number: Float::signum(self.number),
-            derivative: T::from(2).unwrap() * self.derivative
-        }
-    }
-
-    #[inline(always)]
-    fn is_sign_positive(self) -> bool {
-        Float::is_sign_positive(self.number)
-    }
-
-    #[inline(always)]
-    fn is_sign_negative(self) -> bool {
-        Float::is_sign_negative(self.number)
-    }
-
-    #[inline(always)]
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        Trace {
-            number: Float::mul_add(self.number, a.number, b.number),
-            // u'v + uv' + b'
-            derivative: Float::mul_add(
-                self.derivative,
-                a.number,
-                Float::mul_add(self.number, a.derivative, b.derivative),
-            ),
-        }
-    }
-
-    #[inline(always)]
-    fn recip(self) -> Self {
-        Trace {
-            number: Float::recip(self.number),
-            derivative: -(self.derivative / self.number / self.number),
-        }
-    }
-
-    #[inline(always)]
-    fn powi(self, n: i32) -> Self {
-        Trace {
-            number: Float::powi(self.number, n),
-            derivative: { T::from(n).unwrap() * Float::powi(self.number, n - 1) * self.derivative },
-        }
-    }
-
-    #[inline(always)]
-    fn powf(self, n: Self) -> Self {
-        let number = Float::powf(self.number, n.number);
-        Trace {
-            number,
-            derivative: number
-                * (self.derivative * n.number / self.number
-                    + n.derivative * Float::ln(self.number)),
-        }
-    }
-
-    #[inline(always)]
-    fn sqrt(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn exp(self) -> Self {
-        let number = Float::exp(self.number);
-        Self {
-            number,
-            derivative: number * self.derivative,
-        }
-    }
-
-    #[inline(always)]
-    fn exp2(self) -> Self {
-        let number = Float::exp2(self.number);
-        Self {
-            number,
-            derivative: Float::ln(T::from(2).unwrap()) * number * self.derivative,
-        }
-    }
-
-    #[inline(always)]
-    fn ln(self) -> Self {
-        Trace {
-            number: Float::ln(self.number),
-            derivative: self.derivative / self.number,
-        }
-    }
-
-    #[inline(always)]
-    fn log(self, base: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn log2(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn log10(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn max(self, other: Self) -> Self {
-        Trace {
-            number: Float::max(self.number, other.number),
-            derivative: if self.number >= other.number {
-                self.derivative
-            } else {
-                other.derivative
-            },
-        }
-    }
-
-    #[inline(always)]
-    fn min(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn abs_sub(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn cbrt(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn hypot(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn sin(self) -> Self {
-        Trace {
-            number: Float::sin(self.number),
-            derivative: self.derivative * Float::cos(self.number),
-        }
-    }
-
-    #[inline(always)]
-    fn cos(self) -> Self {
-        Trace {
-            number: Float::cos(self.number),
-            derivative: -self.derivative * Float::sin(self.number),
-        }
-    }
-
-    #[inline(always)]
-    fn tan(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn asin(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn acos(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn atan(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn atan2(self, other: Self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn sin_cos(self) -> (Self, Self) {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn exp_m1(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn ln_1p(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn sinh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn cosh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn tanh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn asinh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn acosh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn atanh(self) -> Self {
-        todo!()
-    }
-
-    #[inline(always)]
-    fn integer_decode(self) -> (u64, i16, i8) {
-        Float::integer_decode(self.number)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
     use crate::differentiation::Trace;
+    use ndarray::array;
     use ndarray_linalg::aclose;
     use num_traits::real::Real;
+    use std::ops::Mul;
 
     fn f<T: Real>(x: T, y: T) -> T {
         x.sin() * y.cos()
@@ -731,17 +238,15 @@ mod tests {
         (x + T::from(2).unwrap()) * x.ln()
     }
 
-    fn h<T: Real>(x: T) -> T {
-        x.powf(T::from(3).unwrap())
+    fn h<T: Mul<Output = T> + Copy>(x: T) -> T {
+        x * x * x
     }
 
     #[test]
     fn test_simple_derivative() {
-        let value = g(0.4);
-        aclose(value, -2.199097756497972, 1e-15);
-
-        let derivative = Trace::derivative(g, 0.4);
-        aclose(derivative, 5.083709268125845, 1e-15);
+        let value = Trace::variable(0.4).unary(g, |x| x.ln() + (x + 2.0) / x);
+        aclose(value.number, -2.199097756497972, 1e-15);
+        aclose(value.derivative, 5.083709268125845, 1e-15);
     }
 
     #[test]
@@ -749,22 +254,42 @@ mod tests {
         let value = f(0.4, 0.7);
         aclose(value, 0.2978435767000479, 1e-15);
 
-        let dx = f(Trace::variable(0.4), Trace::constant(0.7));
-        assert_eq!(dx.number, value);
+        let dx = Trace::variable(0.4).binary(
+            &Trace::constant(0.7),
+            f,
+            |x, y| x.cos() * y.cos(),
+            |x, y| -y.sin() * x.sin(),
+        );
+        aclose(dx.number, value, 1e-15);
         aclose(dx.derivative, 0.7044663052755917, 1e-15);
 
-        let dy = f(Trace::constant(0.4), Trace::variable(0.7));
-        assert_eq!(dy.number, value);
+        let dy = Trace::constant(0.4).binary(
+            &Trace::variable(0.7),
+            f,
+            |x, y| x.cos() * y.cos(),
+            |x, y| -y.sin() * x.sin(),
+        );
+        aclose(dy.number, value, 1e-15);
         aclose(dy.derivative, -0.2508701838500143, 1e-15);
     }
-    
+
     #[test]
     fn test_gradient() {
         let value = f(0.4, 0.7);
         aclose(value, 0.2978435767000479, 1e-15);
-        
-        let (v, ds) = Trace::gradient(|xs| f(xs[0], xs[1]), array![0.4, 0.7]);
-        assert_eq!(value, v);
+
+        let (v, ds) = Trace::gradient(
+            |xs| {
+                xs[0].binary(
+                    &xs[1],
+                    f,
+                    |x, y| x.cos() * y.cos(),
+                    |x, y| -y.sin() * x.sin(),
+                )
+            },
+            array![0.4, 0.7],
+        );
+        aclose(value, v, 1e-15);
         aclose(ds[0], 0.7044663052755917, 1e-15);
         aclose(ds[1], -0.2508701838500143, 1e-15);
     }

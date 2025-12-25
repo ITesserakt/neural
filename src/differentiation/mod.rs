@@ -80,26 +80,13 @@
  */
 
 use ndarray::{Array1, ArrayBase, ArrayView1, Data, Ix1};
-use num_traits::{ConstOne, ConstZero, Num, One};
+use num_traits::{ConstOne, ConstZero, One, Zero};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
 
-mod operations;
+mod record_operations;
 mod trace_operations;
-
-/**
- * A trait with no methods which is implemented for all primitive types.
- *
- * Importantly this trait is not implemented for Traces (or Records), to stop the compiler
- * from trying to evaluate nested Traces of Traces or Records of Records as Numeric types.
- * There is no reason to create a Trace of a Trace or Record of a Record, it won't do
- * anything a Trace or Record can't except use more memory.
- *
- * The boilerplate implementations for primitives is performed with a macro.
- * If a primitive type is missing from this list, please open an issue to add it in.
- */
-pub trait Primitive {}
 
 /**
  * A dual number which traces a real number and keeps track of its derivative.
@@ -414,7 +401,7 @@ impl<T: Clone> Clone for Derivatives<T> {
     }
 }
 
-impl<T: Clone + Primitive> Derivatives<T> {
+impl<T: Clone> Derivatives<T> {
     /**
      * Quries the derivative at the provided record as input.
      *
@@ -426,7 +413,7 @@ impl<T: Clone + Primitive> Derivatives<T> {
     }
 }
 
-impl<'a, T: Primitive> std::ops::Index<&Record<'a, T>> for Derivatives<T> {
+impl<'a, T> std::ops::Index<&Record<'a, T>> for Derivatives<T> {
     type Output = T;
     /**
      * Quries the derivative at the provided record as input.
@@ -453,7 +440,7 @@ impl<T> From<Derivatives<T>> for Vec<T> {
 /**
  * Any operation of a Cloneable type implements clone
  */
-impl<T: Clone + Primitive> Clone for Operation<T> {
+impl<T: Clone> Clone for Operation<T> {
     fn clone(&self) -> Self {
         Operation {
             left_parent: self.left_parent,
@@ -486,11 +473,11 @@ impl<T: Clone + Primitive> Clone for Operation<T> {
  *
  * A [tutorial by Rufflewind](https://rufflewind.com/2016-12-30/reverse-mode-automatic-differentiation)
  * and the associated [MIT licensed](http://opensource.org/licenses/MIT)
- * [soure code](https://github.com/Rufflewind/revad/blob/master/src/tape.rs) were invaluable
+ * [source code](https://github.com/Rufflewind/revad/blob/master/src/tape.rs) were invaluable
  * in providing understanding on how to implement Reverse Mode Automatic Differentiation.
  */
 #[derive(Debug)]
-pub struct Record<'a, T: Primitive> {
+pub struct Record<'a, T> {
     // A record consists of a number used in the forward pass, as
     // well as a WengertList of operations performed on the numbers
     // and each record needs to know which point in the history they
@@ -527,7 +514,7 @@ pub struct Record<'a, T: Primitive> {
  * Constants can be used to save memory if you have numbers that
  * you do not need to compute the gradients with respect to.
  */
-impl<'a, T: Num + Primitive> Record<'a, T> {
+impl<'a, T> Record<'a, T> {
     /**
      * Creates an untracked Record which has no backing WengertList.
      *
@@ -567,7 +554,10 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
      *
      * You can alternatively use the [record constructor on the WengertList type](WengertList::variable()).
      */
-    pub fn variable(x: T, history: &'a WengertList<T>) -> Record<'a, T> {
+    pub fn variable(x: T, history: &'a WengertList<T>) -> Record<'a, T>
+    where
+        T: Zero,
+    {
         Record {
             number: x,
             history: Some(history),
@@ -598,7 +588,10 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
      * Resets this Record to place it back on its WengertList, for use
      * in performing another derivation after clearing the WengertList.
      */
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self)
+    where
+        T: Zero,
+    {
         match self.history {
             None => (), // noop
             Some(history) => self.index = history.append_nullary(),
@@ -609,7 +602,10 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
      * A convenience helper function which takes a Record by value and
      * calls [reset](Record::reset()) on it.
      */
-    pub fn do_reset(mut x: Record<T>) -> Record<T> {
+    pub fn do_reset(mut x: Record<T>) -> Record<T>
+    where
+        T: Zero,
+    {
         x.reset();
         x
     }
@@ -622,7 +618,7 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
     }
 }
 
-impl<'a, T: Num + Primitive> Record<'a, T> {
+impl<'a, T> Record<'a, T> {
     /**
      * Performs a backward pass up this record's WengertList from this
      * record as the output, computing all the derivatives for the inputs
@@ -639,7 +635,7 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
     #[track_caller]
     pub fn derivatives(&self) -> Derivatives<T>
     where
-        T: Clone,
+        T: Clone + Zero + One,
     {
         match self.try_derivatives() {
             None => panic!("Record has no WengertList to find derivatives from"),
@@ -659,7 +655,7 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
      */
     pub fn try_derivatives(&self) -> Option<Derivatives<T>>
     where
-        T: Clone,
+        T: Clone + Zero + One,
     {
         let history = self.history?;
         let operations = history.operations.borrow();
@@ -688,7 +684,13 @@ impl<'a, T: Num + Primitive> Record<'a, T> {
     }
 }
 
-impl<T: Primitive> WengertList<T> {
+impl<T> From<T> for Record<'_, T> {
+    fn from(value: T) -> Self {
+        Self::constant(value)
+    }
+}
+
+impl<T> WengertList<T> {
     /**
      * Creates a new empty WengertList from which Records can be constructed.
      */
@@ -697,9 +699,14 @@ impl<T: Primitive> WengertList<T> {
             operations: RefCell::new(Vec::new()),
         }
     }
+
+    pub fn leak() -> &'static WengertList<T> {
+        let list = Box::new(WengertList::new());
+        Box::leak(list)
+    }
 }
 
-impl<T: Primitive> Default for WengertList<T> {
+impl<T> Default for WengertList<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -716,13 +723,16 @@ impl<T> WengertList<T> {
     }
 }
 
-impl<T: Num + Primitive> WengertList<T> {
+impl<T> WengertList<T> {
     /**
      * Creates a record backed by this WengertList.
      *
      * You can alternatively use the [record constructor on the Record type](Record::variable()).
      */
-    pub fn variable(&self, x: T) -> Record<'_, T> {
+    pub fn variable(&self, x: T) -> Record<'_, T>
+    where
+        T: Zero,
+    {
         Record {
             number: x,
             history: Some(self),
@@ -733,7 +743,10 @@ impl<T: Num + Primitive> WengertList<T> {
     /**
      * Adds a value to the list which does not have any parent values.
      */
-    fn append_nullary(&self) -> Index {
+    fn append_nullary(&self) -> Index
+    where
+        T: Zero,
+    {
         use std::ops::DerefMut;
         let mut borrow = self.operations.borrow_mut();
         BorrowedWengertList::new(borrow.deref_mut()).append_nullary()
@@ -745,12 +758,15 @@ impl<T: Num + Primitive> WengertList<T> {
      *
      * If values is 0, returns the first index that would be used but wasn't.
      */
-    fn append_nullary_repeating(&self, values: usize) -> Index {
+    fn append_nullary_repeating(&self, values: usize) -> Index
+    where
+        T: Zero,
+    {
         let mut operations = self.operations.borrow_mut();
         // insert into end of list
         let starting_index = operations.len();
         for i in 0..values {
-            let index = starting_index + i;
+            let index = starting_index.saturating_add(i);
             operations.push(Operation {
                 // this index of the child is used for both indexes as these
                 // won't be needed but will always be valid (ie point to a
@@ -774,7 +790,10 @@ impl<T: Num + Primitive> WengertList<T> {
      *
      * For example, if z = sin(x), then δz/δx = cos(x)
      */
-    fn append_unary(&self, parent: Index, derivative: T) -> Index {
+    fn append_unary(&self, parent: Index, derivative: T) -> Index
+    where
+        T: Zero,
+    {
         use std::ops::DerefMut;
         let mut borrow = self.operations.borrow_mut();
         BorrowedWengertList::new(borrow.deref_mut()).append_unary(parent, derivative)
@@ -829,7 +848,7 @@ impl<T: Num + Primitive> WengertList<T> {
 /**
  * Any Wengert list of a Cloneable type implements clone
  */
-impl<T: Clone + Primitive> Clone for WengertList<T> {
+impl<T: Clone> Clone for WengertList<T> {
     fn clone(&self) -> Self {
         WengertList {
             operations: RefCell::new(self.operations.borrow().clone()),
@@ -840,7 +859,7 @@ impl<T: Clone + Primitive> Clone for WengertList<T> {
 /**
  * Methods for appending Operations after borrowing the Wengert list.
  */
-impl<'a, T: Num + Primitive> BorrowedWengertList<'a, T> {
+impl<'a, T> BorrowedWengertList<'a, T> {
     fn new(operations: &mut Vec<Operation<T>>) -> BorrowedWengertList<'_, T> {
         BorrowedWengertList { operations }
     }
@@ -848,7 +867,10 @@ impl<'a, T: Num + Primitive> BorrowedWengertList<'a, T> {
     /**
      * Adds a value to the list which does not have any parent values.
      */
-    fn append_nullary(&mut self) -> Index {
+    fn append_nullary(&mut self) -> Index
+    where
+        T: Zero,
+    {
         // insert into end of list
         let index = self.operations.len();
         self.operations.push(Operation {
@@ -873,7 +895,10 @@ impl<'a, T: Num + Primitive> BorrowedWengertList<'a, T> {
      *
      * For example, if z = sin(x), then δz/δx = cos(x)
      */
-    fn append_unary(&mut self, parent: Index, derivative: T) -> Index {
+    fn append_unary(&mut self, parent: Index, derivative: T) -> Index
+    where
+        T: Zero,
+    {
         // insert into end of list
         let index = self.operations.len();
         self.operations.push(Operation {
@@ -918,10 +943,7 @@ impl<'a, T: Num + Primitive> BorrowedWengertList<'a, T> {
     }
 }
 
-impl<'a, T: Num + Primitive> Record<'a, T>
-where
-    T: Clone,
-{
+impl<'a, T> Record<'a, T> {
     /**
      * Creates a new Record from a reference to an existing Record by applying
      * some unary function to it which operates on the type the Record wraps.
@@ -944,13 +966,12 @@ where
      * ```
      */
     #[inline]
-    pub fn unary(&self, fx: impl Fn(T) -> T, dfx_dx: impl Fn(T) -> T) -> Record<'_, T> {
+    pub fn unary(self, fx: impl Fn(T) -> T, dfx_dx: impl Fn(T) -> T) -> Record<'a, T>
+    where
+        T: Zero + Clone,
+    {
         match self.history {
-            None => Record {
-                number: fx(self.number.clone()),
-                history: None,
-                index: 0,
-            },
+            None => Record::constant(self.number),
             Some(history) => Record {
                 number: fx(self.number.clone()),
                 history: Some(history),
@@ -994,22 +1015,21 @@ where
     #[inline]
     #[track_caller]
     pub fn binary(
-        &self,
-        rhs: &Record<'a, T>,
+        self,
+        rhs: Record<'a, T>,
         fxy: impl Fn(T, T) -> T,
         dfxy_dx: impl Fn(T, T) -> T,
         dfxy_dy: impl Fn(T, T) -> T,
-    ) -> Record<'_, T> {
-        // assert!(
-        //     record_operations::same_list(self, rhs),
-        //     "Records must be using the same WengertList"
-        // );
+    ) -> Record<'a, T>
+    where
+        T: Zero + Clone,
+    {
+        debug_assert!(
+            record_operations::same_list(&self, &rhs),
+            "Records must be using the same WengertList"
+        );
         match (self.history, rhs.history) {
-            (None, None) => Record {
-                number: fxy(self.number.clone(), rhs.number.clone()),
-                history: None,
-                index: 0,
-            },
+            (None, None) => Record::constant(fxy(self.number, rhs.number)),
             (Some(history), None) => Record {
                 number: fxy(self.number.clone(), rhs.number.clone()),
                 history: Some(history),
@@ -1025,7 +1045,7 @@ where
                 index: history.append_unary(
                     // if self didn't have a history, don't track that derivative
                     rhs.index,
-                    dfxy_dy(self.number.clone(), rhs.number.clone()),
+                    dfxy_dy(self.number, rhs.number),
                 ),
             },
             (Some(history), Some(_)) => Record {
@@ -1035,7 +1055,7 @@ where
                     self.index,
                     dfxy_dx(self.number.clone(), rhs.number.clone()),
                     rhs.index,
-                    dfxy_dy(self.number.clone(), rhs.number.clone()),
+                    dfxy_dy(self.number, rhs.number),
                 ),
             },
         }
@@ -1061,3 +1081,7 @@ fn test_send() {
     fn assert_send<T: Send>() {}
     assert_send::<Trace<f64>>();
 }
+
+const _: () = {
+    assert!(size_of::<Record<f64>>() == 24);
+};

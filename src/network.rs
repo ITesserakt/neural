@@ -1,190 +1,217 @@
-use crate::differentiation::Trace;
-use crate::function::{Id, OnceDifferentiableFunction};
-use ndarray::{Array, Array1, Array2, ArrayBase, ArrayView1, ArrayView2, CowArray, Data, Dimension, Ix1, Ix2, LinalgScalar, ScalarOperand, Zip};
+use crate::differentiation::{Record, WengertList};
+use crate::function_v2::{ArrayFunction, Exp, Linear, OnceDifferentiableFunction};
+use crate::network::hacks::NetworkData;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, LinalgScalar, Zip};
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
 use ndarray_rand::rand_distr::{Distribution, Normal, StandardNormal};
 use ndarray_rand::RandomExt;
-use num_traits::{ConstOne, ConstZero, Float, FromPrimitive, Zero};
-use progressing::Baring;
-use std::ops::{AddAssign, Deref, DerefMut, Mul};
-use crate::activation::softmax_fn;
+use num_traits::{Float, Zero};
+use smallvec::SmallVec;
+use std::fmt::Debug;
+use std::ops::{AddAssign, Deref, DerefMut, Neg, SubAssign};
 
-pub struct Parameters<T> {
+#[derive(Debug, Clone)]
+struct Parameters<T> {
     weights: Array2<T>,
     biases: Array1<T>,
 }
 
-pub struct Layer<T: 'static> {
-    activation: OnceDifferentiableFunction<'static, (T,)>,
+#[derive(Clone)]
+struct Layer<T: 'static> {
+    activation: OnceDifferentiableFunction<T>,
     size: usize,
-
     parameters: Parameters<T>,
 }
 
-pub struct Hidden;
-pub struct Ready;
+const INLINE_LAYER_BUFFER_SIZE: usize = 3;
 
-pub struct Network<T: 'static, State, R = StdRng> {
-    input_size: usize,
-    layers: Vec<Layer<T>>,
-    loss: OnceDifferentiableFunction<'static, (Array1<T>, Array1<T>), Id<T>>,
+pub struct Hidden<R> {
     rng: R,
-    _state: State,
+}
+pub struct Ready<F> {
+    output: F,
 }
 
-impl<T> Deref for Layer<T> {
+mod hacks {
+    use crate::differentiation::WengertList;
+    use crate::network::{Layer, INLINE_LAYER_BUFFER_SIZE};
+    use smallvec::SmallVec;
+
+    pub(super) struct NetworkData<T: 'static> {
+        pub(super) tape: &'static WengertList<T>,
+        layers: SmallVec<[Layer<T>; INLINE_LAYER_BUFFER_SIZE]>,
+    }
+
+    impl<T> NetworkData<T> {
+        pub(super) fn layers(&self) -> &[Layer<T>] {
+            self.layers.as_ref()
+        }
+
+        pub(super) fn layers_mut(&mut self) -> &mut [Layer<T>] {
+            self.layers.as_mut()
+        }
+
+        pub(super) fn push_layer(&mut self, value: Layer<T>) {
+            self.layers.push(value);
+        }
+
+        pub(super) fn empty() -> Self {
+            Self {
+                tape: WengertList::leak(),
+                layers: SmallVec::new(),
+            }
+        }
+    }
+}
+
+impl<T: 'static> Deref for Layer<T> {
     type Target = Parameters<T>;
 
-    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.parameters
     }
 }
 
-impl<T> DerefMut for Layer<T> {
-    #[inline(always)]
+impl<T: 'static> DerefMut for Layer<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.parameters
     }
 }
 
-impl<T> Layer<T> {
-    #[inline(always)]
-    fn activate<D>(&self, x: Array<T, D>) -> Array<T, D>
+impl<T> Parameters<T> {
+    fn map<U>(&self, f: impl Fn(T) -> U) -> Parameters<U>
     where
-        T: Clone + Zero,
-        D: Dimension,
+        T: Clone,
     {
-        x.mapv_into(|it| self.activation.call((it,)))
-    }
-
-    #[inline(always)]
-    fn activate_with_derivative<D>(
-        &self,
-        x: ArrayBase<impl Data<Elem = T>, D>,
-    ) -> Array<Trace<T>, D>
-    where
-        T: Clone + ConstOne,
-        D: Dimension,
-    {
-        x.mapv(|it| self.activation.derivative(it))
-    }
-}
-
-impl<T> Network<T, Hidden> {
-    pub fn new(input_size: usize) -> Self
-    where
-        T: FromPrimitive,
-        T: Float,
-        T: Send + Sync,
-    {
-        Self {
-            input_size,
-            layers: vec![],
-            rng: StdRng::from_os_rng(),
-            loss: Self::DEFAULT_LOSS_FUNCTION,
-            _state: Hidden,
+        Parameters {
+            weights: self.weights.mapv(&f),
+            biases: self.biases.mapv(f),
         }
     }
 }
 
-impl<T, S, R> Network<T, S, R>
-where
-    T: Float,
-{
-    const DEFAULT_LOSS_FUNCTION: OnceDifferentiableFunction<'static, (Array1<T>, Array1<T>), Id<T>> =
-        OnceDifferentiableFunction::from_ref(
-            &|(x, y): (Array1<T>, Array1<T>)| (&x - &y).powi(2).sum(),
-            &|_: (Trace<Array1<T>>, Trace<Array1<T>>)| todo!(),
-        );
+impl<T: 'static> Layer<T> {
+    fn write_to_tape(
+        self,
+        tape: &'_ WengertList<T>,
+    ) -> (OnceDifferentiableFunction<T>, Parameters<Record<'_, T>>)
+    where
+        T: Zero + Clone,
+    {
+        (
+            self.activation,
+            self.parameters.map(|x| Record::variable(x, tape)),
+        )
+    }
 }
 
-impl<T, R> Network<T, Hidden, R> {
+pub struct Network<T: 'static, State> {
+    inner: NetworkData<T>,
+    input_size: usize,
+    state: State,
+}
+
+impl<T> Network<T, Hidden<StdRng>> {
+    pub fn new(input_size: usize) -> Self {
+        Self {
+            inner: NetworkData::empty(),
+            input_size,
+            state: Hidden {
+                rng: StdRng::from_os_rng(),
+            },
+        }
+    }
+}
+
+impl<T, R> Network<T, Hidden<R>> {
     pub fn with_seed(input_size: usize, seed: u64) -> Self
     where
         R: SeedableRng,
         T: Float,
     {
         Self {
+            inner: NetworkData::empty(),
             input_size,
-            layers: vec![],
-            rng: R::seed_from_u64(seed),
-            loss: Self::DEFAULT_LOSS_FUNCTION,
-            _state: Hidden,
+            state: Hidden {
+                rng: R::seed_from_u64(seed),
+            },
         }
     }
-}
 
-impl<T, R> Network<T, Hidden, R>
-where
-    R: Rng,
-{
     pub fn push_hidden_layer(
         mut self,
         size: usize,
-        activation: OnceDifferentiableFunction<'static, (T,)>,
+        activation: OnceDifferentiableFunction<T>,
     ) -> Self
     where
-        StandardNormal: Distribution<T>,
+        R: Rng,
         T: Float,
+        StandardNormal: Distribution<T>,
     {
         let normal = Normal::new(T::zero(), T::one()).unwrap();
-        let previous_size = self.layers.last().map_or(self.input_size, |it| it.size);
+        let previous_size = self
+            .inner
+            .layers()
+            .last()
+            .map_or(self.input_size, |it| it.size);
 
-        self.layers.push(Layer {
+        let w = T::from(2.0 / (size + previous_size) as f64).unwrap().sqrt();
+        let weights = Array2::random_using(
+            (size, previous_size),
+            normal.map(|x| x * w),
+            &mut self.state.rng,
+        );
+        let b = T::from(2.0 / size as f64).unwrap().sqrt();
+        let biases = Array1::random_using(size, normal.map(|x| x * b), &mut self.state.rng);
+
+        let layer = Layer {
             activation,
             size,
-            parameters: Parameters {
-                weights: Array2::random_using(
-                    (size, previous_size),
-                    normal.map(|it| it * (T::from(2.0 / (size + previous_size) as f64).unwrap().sqrt())),
-                    &mut self.rng,
-                ),
-                biases: Array1::random_using(
-                    size,
-                    normal.map(|it| it * (T::from(2.0 / size as f64).unwrap().sqrt())),
-                    &mut self.rng,
-                ),
-            },
-        });
+            parameters: Parameters { weights, biases },
+        };
+        self.inner.push_layer(layer);
+
         self
     }
 
     pub fn push_output_layer(
         self,
         size: usize,
-        activation: OnceDifferentiableFunction<'static, (T,)>,
-    ) -> Network<T, Ready, R>
+        activation: OnceDifferentiableFunction<T>,
+    ) -> Network<T, Ready<Linear>>
     where
         T: Float,
         StandardNormal: Distribution<T>,
+        R: Rng,
     {
         let this = self.push_hidden_layer(size, activation);
         Network {
-            layers: this.layers,
+            inner: this.inner,
             input_size: this.input_size,
-            loss: Self::DEFAULT_LOSS_FUNCTION,
-            rng: this.rng,
-            _state: Ready,
+            state: Ready { output: Linear },
         }
     }
 }
 
-impl<T, R> Network<T, Ready, R> {
-    fn empty_parameters(&self) -> impl Iterator<Item = Parameters<T>>
+impl<T, F> Network<T, Ready<F>>
+where
+    F: ArrayFunction<Ix1>,
+{
+    pub fn map_output<G>(self, g: G) -> Network<T, Ready<G>>
     where
-        T: Zero + Clone,
+        G: ArrayFunction<Ix1>,
     {
-        self.layers.iter().map(|it| Parameters {
-            weights: Array2::zeros(it.weights.dim()),
-            biases: Array1::zeros(it.biases.dim()),
-        })
+        Network {
+            inner: self.inner,
+            input_size: self.input_size,
+            state: Ready { output: g },
+        }
     }
 
     pub fn predict<'a>(&self, input: impl Into<CowArray<'a, T, Ix1>>) -> Array1<T>
     where
-        T: LinalgScalar,
+        T: LinalgScalar + Neg<Output = T> + Exp,
     {
         let mut current = input.into();
         debug_assert_eq!(
@@ -195,19 +222,22 @@ impl<T, R> Network<T, Ready, R> {
             current.dim()
         );
 
-        for layer in self.layers.iter() {
+        for layer in self.inner.layers() {
             let a = layer.weights.dot(&current) + &layer.biases;
-            let z = layer.activate(a);
-            current = CowArray::from(z);
+            let z = a.mapv_into(|x| layer.activation.call(x));
+            current = z.into();
         }
-        current.to_owned()
+
+        let mut y_pred = current.to_owned();
+        self.state.output.call(y_pred.view_mut());
+        y_pred
     }
 
-    pub fn predict_many<'a>(&self, inputs: impl Into<CowArray<'a, T, Ix2>>) -> Array2<T>
+    pub fn predict_many<'a>(&self, input: impl Into<CowArray<'a, T, Ix2>>) -> Array2<T>
     where
-        T: LinalgScalar + AddAssign,
+        T: LinalgScalar + Neg<Output = T> + AddAssign + Exp,
     {
-        let mut current = inputs.into().reversed_axes();
+        let mut current = input.into().reversed_axes();
         debug_assert_eq!(
             self.input_size,
             current.nrows(),
@@ -216,124 +246,80 @@ impl<T, R> Network<T, Ready, R> {
             current.dim()
         );
 
-        for layer in self.layers.iter() {
+        for layer in self.inner.layers() {
             let mut a = layer.weights.dot(&current);
             Zip::from(a.columns_mut()).for_each(|mut a| a += &layer.biases);
-            let z = layer.activate(a);
+            let z = a.mapv_into(|x| layer.activation.call(x));
             current = CowArray::from(z);
         }
 
-        current.to_owned()
+        let mut y_pred = current.to_owned();
+        Zip::from(y_pred.columns_mut()).for_each(|col| self.state.output.call(col));
+        y_pred
     }
 
-    #[inline(always)]
-    fn compute_partial_derivatives<'a, 'b>(
-        &'a self,
-        x: ArrayView1<'b, T>,
-        y: ArrayView1<'b, T>,
-    ) -> impl Iterator<Item = (Array1<T>, Array1<T>)> + use<'a, T, R>
-    where
-        T: Float + ConstOne + ConstZero + ScalarOperand,
-    {
-        let mut current = CowArray::from(x);
-        let (zss, mut ass) = self
-            .layers
-            .iter()
-            .map(|layer| {
-                let zs = layer.weights.dot(&current) + &layer.biases;
-                let ass = layer.activate(zs.to_owned());
-                current = ass.to_owned().into();
-                (zs, ass)
-            })
-            .unzip::<_, _, Vec<_>, Vec<_>>();
-
-        let a = ass.pop().unwrap();
-        let mut loss_grad = Zip::from(&a).and(&y).map_collect(|yp, yr| *yp - *yr);
-
-        let deltas = self
-            .layers
-            .iter()
-            .zip(zss)
-            .rev()
-            .map(|(layer, zs)| {
-                let delta = zs
-                    .mapv_into(|z| layer.activation.derivative(z).derivative)
-                    .mul(&loss_grad);
-
-                loss_grad = layer.weights.t().dot(&delta);
-                delta
-            })
-            .collect::<Vec<_>>();
-
-        deltas
-            .into_iter()
-            .zip(std::iter::once(x.to_owned()).chain(ass).rev())
-    }
-
-    pub fn learn(
+    pub fn learn<'a>(
         &mut self,
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
         learning_rate: T,
-    ) where
-        T: Float + AddAssign + ConstOne + ConstZero + ScalarOperand + Send + Sync,
-        R: Send + Sync,
+        loss: impl Fn(Array1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
+    ) -> Array1<T>
+    where
+        T: LinalgScalar + Neg<Output = T> + SubAssign + Float,
+        T: Debug,
     {
         assert_eq!(batched_input.nrows(), batched_target.nrows());
 
-        let init = || self.empty_parameters().collect::<Vec<_>>();
-        let combine = |a: Vec<Parameters<T>>, b: Vec<Parameters<T>>| -> Vec<_> {
-            a.into_iter()
-                .zip(b)
-                .map(|(mut a, b)| {
-                    a.weights += &b.weights;
-                    a.biases += &b.biases;
-                    a
-                })
-                .collect()
-        };
-        let gradients = Zip::from(batched_input.rows())
+        Zip::from(batched_input.rows())
             .and(batched_target.rows())
-            .par_fold(
-                init,
-                |mut acc, x, y| {
-                    self.compute_partial_derivatives(x, y)
-                        .zip(acc.iter_mut().rev())
-                        .for_each(|((d, a), acc)| {
-                            let a_len = a.len();
-                            let at = a.into_shape_with_order((1, a_len)).unwrap();
-                            let d_len = d.len();
-                            let dt = d.into_shape_with_order((d_len, 1)).unwrap();
-                            acc.weights += &dt.dot(&at);
-                            acc.biases += &dt.into_flat();
-                        });
-                    acc
-                },
-                combine,
-            );
+            .map_collect(|x, y| {
+                let (fs, ps) = self
+                    .inner
+                    .layers()
+                    .iter()
+                    .map(|it| it.clone().write_to_tape(self.inner.tape))
+                    .unzip::<_, _, SmallVec<[_; INLINE_LAYER_BUFFER_SIZE]>, SmallVec<[_; INLINE_LAYER_BUFFER_SIZE]>>();
 
-        let scale = learning_rate / T::from(batched_input.nrows()).unwrap();
-        self.layers
-            .iter_mut()
-            .zip(gradients)
-            .for_each(|(layer, p)| {
-                layer.weights.scaled_add(-scale, &p.weights);
-                layer.biases.scaled_add(-scale, &p.biases);
-            });
+                let mut current = x.mapv(Record::constant);
+                for (f, p) in fs.iter().zip(&ps) {
+                    let a = p.weights.dot(&current) + &p.biases;
+                    let z = a.mapv_into(|x| x.unary(|x| f.call(x), |x| f.derivative(x)));
+                    current = z;
+                }
+                let mut y_pred = current;
+                self.state.output.call(y_pred.view_mut());
+                let loss_value = loss(y_pred, y);
+
+                let ds = loss_value.derivatives();
+                for (layer, p) in self.inner.layers_mut().into_iter().zip(ps) {
+                    Zip::from(&mut layer.weights)
+                        .and(&p.weights)
+                        .for_each(|w, pw| *w -= learning_rate * ds[pw]);
+
+                    Zip::from(&mut layer.biases)
+                        .and(&p.biases)
+                        .for_each(|b, pb| *b -= learning_rate * ds[pb]);
+                }
+                self.inner.tape.clear();
+
+                loss_value.number
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::activation::{linear_fn, sigmoid_fn};
-    use crate::network::Network;
-    use ndarray::array;
+    use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
+    use crate::differentiation::Record;
+    use crate::network::{Hidden, Network};
+    use ndarray::{array, Array1, ArrayView1, Zip};
     use ndarray_linalg::aclose;
-    use ndarray_rand::rand::rngs::StdRng;
+    use ndarray_rand::rand::prelude::StdRng;
 
     #[test]
     fn test_network_prediction() {
-        let network = Network::<f64, _, StdRng>::with_seed(2, 0)
+        let network = Network::<f64, Hidden<StdRng>>::with_seed(2, 0)
             .push_hidden_layer(4, sigmoid_fn())
             .push_output_layer(1, linear_fn());
 
@@ -345,5 +331,41 @@ mod tests {
         aclose(d[(0, 0)], a[0], 1e-15);
         aclose(d[(0, 1)], b[0], 1e-15);
         aclose(d[(0, 2)], c[0], 1e-15);
+    }
+
+    #[test]
+    fn test_network_learning() {
+        fn sse<'a>(yp: Array1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
+            Zip::from(&yp)
+                .and(&yr)
+                .fold(Record::constant(0.0), |acc, &yp, &yr| {
+                    acc + Record::constant(0.5)
+                        * (yp - Record::constant(yr)).unary(|x| x.powi(2), |x| 2.0 * x)
+                })
+        }
+
+        let mut network = Network::<_, Hidden<StdRng>>::with_seed(2, 0)
+            .push_hidden_layer(2, relu_fn())
+            .push_output_layer(1, linear_fn());
+
+        let xs = array![
+            [1.0, 2.0],
+            [0.5, 0.7],
+            [0.0, 1.0],
+            [2.0, 0.5],
+            [-0.15, 0.23]
+        ];
+        let ys = array![[3.0], [1.2], [1.0], [2.5], [0.08]];
+
+        for _ in 0..300 {
+            println!(
+                "{:.3}\t\t{:.3}",
+                network.learn(xs.view(), ys.view(), 1e-1, sse),
+                network.predict(array![0.1, 0.2])
+            );
+        }
+
+        let prediction = network.predict(array![0.1, 0.2]);
+        aclose(prediction[0], 0.3, 1e-9);
     }
 }

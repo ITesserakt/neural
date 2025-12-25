@@ -1,16 +1,16 @@
-{ pkgs ? import <nixpkgs> {} }: let
-    toolchain = pkgs.rust.packages.stable;
-in pkgs.mkShell rec {
+{
+  pkgs ? import <nixpkgs> { },
+}:
+pkgs.mkShell {
   packages = with pkgs; [
-    toolchain.cargo
-    toolchain.rustc
-    toolchain.rustfmt
-    toolchain.clippy
+    rustup
+
     pkg-config
 
     blas
     openblas
     openssl
+    gfortran
 
     (with python3Packages; [
       datasets
@@ -20,10 +20,4 @@ in pkgs.mkShell rec {
   ];
 
   RUSTFLAGS = "-lblas";
-
-  RUST_SRC_PATH = toolchain.rustPlatform.rustLibSrc;
-  RUST_TOOLCHAIN_PATH = pkgs.symlinkJoin {
-      name = "neural-toolchain";
-      paths = packages;
-  };
 }
