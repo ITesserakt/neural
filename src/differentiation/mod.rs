@@ -85,6 +85,8 @@ use num_traits::{ConstOne, ConstZero, One, ToPrimitive, Zero};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
+use object_pool::Reusable;
+use tracing::debug;
 
 mod record_operations;
 mod trace_operations;
@@ -316,7 +318,7 @@ where
 /**
  * WengertLists are indexed with [`usize`].
  */
-pub type Index = u32;
+pub type Index = usize;
 
 /**
  * A list of operations performed in a forward pass of a dynamic computational graph,
@@ -353,6 +355,30 @@ pub struct WengertList<T> {
     // It is neccessary to wrap the vec in a RefCell to allow for mutating
     // this list from immutable references held by each
     operations: RefCell<Vec<Operation<T>>>,
+}
+
+pub struct WengertListPool<T: 'static>(object_pool::Pool<&'static WengertList<T>>);
+
+unsafe impl<T: Send + Sync> Sync for WengertListPool<T> {}
+
+impl<T: 'static> WengertListPool<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self(object_pool::Pool::new(capacity, || WengertList::leak()))
+    }
+
+    pub fn acquire(&self) -> Reusable<'_, &'static WengertList<T>> {
+        self.0.pull(|| WengertList::leak())
+    }
+}
+
+impl<T: 'static> Drop for WengertListPool<T> {
+    fn drop(&mut self) {
+        debug!("Total allocated tapes: {}", self.0.len());
+        while let Some(tape) = self.0.try_pull() {
+            let (_, tape) = Reusable::detach(tape);
+            tape.operations.take();
+        }
+    }
 }
 
 struct BorrowedWengertList<'a, T> {
@@ -498,6 +524,7 @@ impl<T: Clone> Clone for Operation<T> {
  * in providing understanding on how to implement Reverse Mode Automatic Differentiation.
  */
 #[derive(Debug)]
+#[repr(C)]
 pub struct Record<'a, T> {
     // A record consists of a number used in the forward pass, as
     // well as a WengertList of operations performed on the numbers
@@ -519,9 +546,12 @@ pub struct Record<'a, T> {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct FrozenRecord<T: 'static> {
     pub number: T,
-    _history: Option<&'static ()>,
+    /// Do not touch this field at all.
+    /// If value was transmuted from ordinary `[Record<T>]` here will be potentially dangling pointer.
+    _history: Option<&'static std::convert::Infallible>,
     pub index: Index,
 }
 

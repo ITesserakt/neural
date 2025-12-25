@@ -76,17 +76,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             .zip(train_ys.axis_chunks_iter(Axis(0), config.batch_size))
             .enumerate()
         {
-            let loss = network.learn(xs, ys, config.learning_rate, cross_entropy);
+            network.learn(xs, ys, config.learning_rate, cross_entropy);
 
             p.set(epoch * (train_length / config.batch_size) + i);
-            print!("{p:<50}{:^10.3?}\r", loss.mean().unwrap());
+            print!("{p:<50}\r");
             std::io::stdout().flush()?;
         }
 
         let predicted = network.predict_many(test_xs).reversed_axes();
         let error = Zip::from(predicted.rows())
             .and(test_ys.rows())
-            .par_map_collect(|yp, yr| cross_entropy(yp, yr).number)
+            .map_collect(|yp, yr| cross_entropy(yp, yr).number)
             .sum();
         println!("{:.3}", predicted.row(0));
         println!("{:.3}", test_ys.row(0));
