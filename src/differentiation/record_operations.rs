@@ -2,14 +2,21 @@ use crate::differentiation::{Record, WengertList};
 use num_traits::real::Real;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
+use std::fmt::{Formatter, LowerExp};
 use std::ops::{Add, Div, DivAssign, Mul, Neg, Rem, Sub};
 
 /**
  * A record is displayed by showing its number component.
  */
 impl<'a, T: std::fmt::Display> std::fmt::Display for Record<'a, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "{}", self.number)
+    }
+}
+
+impl<'a, T: LowerExp> LowerExp for Record<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(f)
     }
 }
 

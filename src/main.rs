@@ -1,7 +1,7 @@
-use crate::activation::{linear_fn, sigmoid_fn};
+use crate::activation::{elu, linear_fn, relu_fn, sigmoid_fn};
 use crate::config::Config;
 use crate::differentiation::Record;
-use crate::function_v2::Softmax;
+use crate::function_v2::{He, Softmax, Standard, Xavier};
 use crate::mnist::Mnist;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
@@ -50,9 +50,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mnist = config.load_mnist_dataset()?;
 
     let mut network = Network::new(28 * 28)
-        .push_hidden_layer(128, sigmoid_fn())
-        .push_hidden_layer(64, sigmoid_fn())
-        .push_output_layer(10, linear_fn())
+        .push_hidden_layer(64, (relu_fn(), He))
+        .push_output_layer(10, (linear_fn(), Xavier))
         .map_output(Softmax);
 
     let train_length = mnist.train().length();
@@ -76,10 +75,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .zip(train_ys.axis_chunks_iter(Axis(0), config.batch_size))
             .enumerate()
         {
-            network.learn(xs, ys, config.learning_rate, cross_entropy);
+            let loss = network.learn(xs, ys, config.learning_rate, cross_entropy);
 
             p.set(epoch * (train_length / config.batch_size) + i);
-            print!("{p:<50}\r");
+            print!("{p:<50}{loss:^10.2}\r");
             std::io::stdout().flush()?;
         }
 

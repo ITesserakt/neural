@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 ndarray = { version = "0.17", features = ["rayon", "serde"] }
-ndarray-linalg = { version = "0.18", features = ["netlib-system"] }
+ndarray-linalg = { version = "0.18", features = ["intel-mkl-static"] }
 ndarray-rand = "0.16"
 num-traits = "0.2"
 object-pool = "0.6.0"

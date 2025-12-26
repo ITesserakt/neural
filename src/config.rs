@@ -23,7 +23,7 @@ pub struct Config {
     #[arg(short, long, default_value_t = 256)]
     pub batch_size: usize,
     #[arg(short, long, default_value_t = 1e-1)]
-    pub learning_rate: f32,
+    pub learning_rate: f64,
 }
 
 type SerializationError = postcard::Error;

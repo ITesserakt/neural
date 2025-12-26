@@ -318,7 +318,7 @@ where
 /**
  * WengertLists are indexed with [`usize`].
  */
-pub type Index = usize;
+pub type Index = u32;
 
 /**
  * A list of operations performed in a forward pass of a dynamic computational graph,
@@ -733,7 +733,7 @@ impl<'a, T> Record<'a, T> {
 
         // Go back up the computation graph to the inputs
         for i in (0..operations.len()).rev() {
-            let operation = operations[i].clone();
+            let operation = &operations[i];
             let derivative = derivatives.at(i);
             // The chain rule allows breaking up the derivative of the output y
             // with respect to the input x into many smaller derivatives that
@@ -741,9 +741,9 @@ impl<'a, T> Record<'a, T> {
             // δy/δx = δy/δw * δw/δx
             // δy/δx = sum for all i parents of y ( δy/δw_i * δw_i/δx )
             *derivatives.at_mut(operation.left_parent) = derivatives.at(operation.left_parent)
-                + derivative.clone() * operation.left_derivative;
+                + derivative.clone() * operation.left_derivative.clone();
             *derivatives.at_mut(operation.right_parent) = derivatives.at(operation.right_parent)
-                + derivative * operation.right_derivative;
+                + derivative * operation.right_derivative.clone();
         }
 
         Some(derivatives)

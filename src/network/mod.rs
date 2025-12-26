@@ -1,17 +1,25 @@
+mod config;
+
 use crate::differentiation::{FrozenRecord, Record, WengertList, WengertListPool};
-use crate::function_v2::{ArrayFunction, Exp, Linear, OnceDifferentiableFunction};
+use crate::function_v2::{
+    ArrayFunction, Exp, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
+    WeightsInitialization,
+};
+use crate::network::config::{Hidden, IntoLayerConfig, Ready};
 use ndarray::parallel::prelude::{IntoParallelIterator, ParallelIterator};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, LinalgScalar, Zip};
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
-use ndarray_rand::rand_distr::{Distribution, Normal, StandardNormal};
 use ndarray_rand::RandomExt;
-use num_traits::{Float, NumCast, One, Zero};
+use num_traits::{Float, Zero};
+use object_pool::Reusable;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
+use std::iter::Sum;
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
     weights: Array2<T>,
     biases: Array1<T>,
@@ -26,13 +34,6 @@ struct Layer<T: 'static> {
 
 const INLINE_LAYER_BUFFER_SIZE: usize = 3;
 type TempStorage<T> = SmallVec<[T; INLINE_LAYER_BUFFER_SIZE]>;
-
-pub struct Hidden<R> {
-    rng: R,
-}
-pub struct Ready<F> {
-    output: F,
-}
 
 pub(super) struct NetworkData<T: 'static> {
     tapes: WengertListPool<T>,
@@ -50,7 +51,7 @@ impl<T> NetworkData<T> {
 
     fn empty() -> Self {
         Self {
-            tapes: WengertListPool::new(1),
+            tapes: WengertListPool::new(rayon::max_num_threads()),
             layers: SmallVec::new(),
         }
     }
@@ -88,23 +89,6 @@ impl<T> Parameters<T> {
         Self {
             weights: Array2::zeros((output_size, input_size)),
             biases: Array1::zeros(output_size),
-        }
-    }
-
-    fn random(output_size: usize, input_size: usize, rng: &mut impl Rng) -> Self
-    where
-        T: Zero + One + NumCast + Float,
-        StandardNormal: Distribution<T>,
-    {
-        let normal = Normal::new(T::zero(), T::one()).unwrap();
-        let w = T::from(2.0 / (output_size + input_size) as f64)
-            .unwrap()
-            .sqrt();
-        let b = T::from(2.0 / output_size as f64).unwrap().sqrt();
-
-        Self {
-            weights: Array2::random_using((output_size, input_size), normal.map(|it| it * w), rng),
-            biases: Array1::random_using(output_size, normal.map(|it| it * b), rng),
         }
     }
 }
@@ -168,16 +152,17 @@ impl<T, R> Network<T, Hidden<R>> {
         }
     }
 
-    pub fn push_hidden_layer(
+    pub fn push_hidden_layer<F, W>(
         mut self,
         size: usize,
-        activation: OnceDifferentiableFunction<T>,
+        config: impl IntoLayerConfig<T, F, W>,
     ) -> Self
     where
         R: Rng,
-        T: Float,
-        StandardNormal: Distribution<T>,
+        F: OnceDifferentiableFunctionOps<T>,
+        W: WeightsInitialization<T>,
     {
+        let config = config.into_config();
         let previous_size = self
             .inner
             .layers()
@@ -185,26 +170,41 @@ impl<T, R> Network<T, Hidden<R>> {
             .map_or(self.input_size, |it| it.size);
 
         let layer = Layer {
-            activation,
+            activation: config.activation.into_boxed(),
             size,
-            parameters: Parameters::random(size, previous_size, &mut self.state.rng),
+            parameters: Parameters {
+                weights: Array2::random_using(
+                    (size, previous_size),
+                    config
+                        .weights_initialization
+                        .distribution(size, previous_size),
+                    &mut self.state.rng,
+                ),
+                biases: Array1::random_using(
+                    size,
+                    config
+                        .weights_initialization
+                        .distribution(size, previous_size),
+                    &mut self.state.rng,
+                ),
+            },
         };
         self.inner.push_layer(layer);
 
         self
     }
 
-    pub fn push_output_layer(
+    pub fn push_output_layer<F, W>(
         self,
         size: usize,
-        activation: OnceDifferentiableFunction<T>,
+        config: impl IntoLayerConfig<T, F, W>,
     ) -> Network<T, Ready<Linear>>
     where
-        T: Float,
-        StandardNormal: Distribution<T>,
+        F: OnceDifferentiableFunctionOps<T>,
+        W: WeightsInitialization<T>,
         R: Rng,
     {
-        let this = self.push_hidden_layer(size, activation);
+        let this = self.push_hidden_layer(size, config);
         Network {
             inner: this.inner,
             input_size: this.input_size,
@@ -244,7 +244,7 @@ where
 
         for layer in self.inner.layers() {
             let a = layer.weights.dot(&current) + &layer.biases;
-            let z = a.mapv_into(|x| layer.activation.call(x));
+            let z = a.mapv_into(|x| layer.activation.function(x));
             current = z.into();
         }
 
@@ -269,7 +269,7 @@ where
         for layer in self.inner.layers() {
             let mut a = layer.weights.dot(&current);
             Zip::from(a.columns_mut()).for_each(|mut a| a += &layer.biases);
-            let z = a.mapv_into(|x| layer.activation.call(x));
+            let z = a.mapv_into(|x| layer.activation.function(x));
             current = CowArray::from(z);
         }
 
@@ -284,8 +284,9 @@ where
         batched_target: ArrayView2<T>,
         learning_rate: T,
         loss: L,
-    ) where
-        T: LinalgScalar + Neg<Output = T> + AddAssign + Float,
+    ) -> T
+    where
+        T: LinalgScalar + Neg<Output = T> + Float + Sum,
         T: Send + Sync,
         F: Send + Sync,
         L: Fn(Array1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
@@ -300,58 +301,66 @@ where
             .collect::<TempStorage<_>>();
         let (tx, rx) = std::sync::mpsc::channel();
 
-        rayon::join(
+        let compute_gradients =
+            |tape: &mut Reusable<&'static WengertList<T>>,
+             (x, y): (ArrayView1<T>, ArrayView1<T>)| {
+                tape.clear();
+                let (fs, ps) = params
+                    .iter()
+                    .map(|it| it.clone().write_to_tape(tape))
+                    .unzip::<_, _, TempStorage<_>, TempStorage<_>>();
+
+                let mut current = x.mapv(Record::constant);
+                for (f, p) in fs.iter().zip(&ps) {
+                    let a = p.weights.dot(&current) + &p.biases;
+                    let z = a.mapv_into(|x| x.unary(|x| f.function(x), |x| f.derivative(x)));
+                    current = z;
+                }
+                let mut y_pred = current;
+                self.state.output.call(y_pred.view_mut());
+                let loss_value = loss(y_pred, y);
+
+                let ds = loss_value.derivatives();
+
+                (
+                    ps.into_iter()
+                        .map(|it| it.freeze())
+                        .collect::<TempStorage<_>>(),
+                    ds,
+                    loss_value.number,
+                )
+            };
+
+        let apply_gradients = || {
+            let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
+            for income in rx {
+                for (layer, g) in self.inner.layers.iter_mut().zip(income) {
+                    let g: Parameters<T> = g;
+                    layer.weights.scaled_add(factor, &g.weights);
+                    layer.biases.scaled_add(factor, &g.biases);
+                }
+            }
+        };
+
+        let (total_loss, _) = rayon::join(
             || {
                 Zip::from(batched_input.rows())
                     .and(batched_target.rows())
                     .into_par_iter()
-                    .map_init(
-                        || self.inner.tapes.acquire(),
-                        |tape, (x, y)| {
-                            tape.clear();
-                            let (fs, ps) = params
-                                .iter()
-                                .map(|it| it.clone().write_to_tape(tape))
-                                .unzip::<_, _, TempStorage<_>, TempStorage<_>>();
-
-                            let mut current = x.mapv(Record::constant);
-                            for (f, p) in fs.iter().zip(&ps) {
-                                let a = p.weights.dot(&current) + &p.biases;
-                                let z =
-                                    a.mapv_into(|x| x.unary(|x| f.call(x), |x| f.derivative(x)));
-                                current = z;
-                            }
-                            let mut y_pred = current;
-                            self.state.output.call(y_pred.view_mut());
-                            let loss_value = loss(y_pred, y);
-
-                            let ds = loss_value.derivatives();
-
-                            (
-                                ps.into_iter()
-                                    .map(|it| it.freeze())
-                                    .collect::<TempStorage<_>>(),
-                                ds,
-                            )
-                        },
-                    )
-                    .for_each_with(tx, |tx, (ps, ds)| {
+                    .map_init(|| self.inner.tapes.acquire(), compute_gradients)
+                    .map_with(tx, |tx, (ps, ds, loss)| {
                         _ = tx.send(ps.into_iter().map(move |p| Parameters {
                             weights: p.weights.map(|pw| ds[pw]),
                             biases: p.biases.map(|pb| ds[pb]),
                         }));
-                    });
+                        loss
+                    })
+                    .sum::<T>()
             },
-            || {
-                let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
-                for income in rx {
-                    for (layer, g) in self.inner.layers.iter_mut().zip(income) {
-                        layer.weights.scaled_add(factor, &g.weights);
-                        layer.biases.scaled_add(factor, &g.biases);
-                    }
-                }
-            },
+            apply_gradients,
         );
+
+        total_loss
     }
 }
 
@@ -455,7 +464,8 @@ mod tests {
         assert_aclose!(loss_before[0], 1.0, 1e-15);
         assert_aclose!(loss_before[1], 0.5800256583859735, 1e-15);
 
-        network.learn(xs.view(), ys.view(), 0.1, sse);
+        let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse);
+        aclose(loss_right_in, loss_before.sum(), 1e-15);
         assert_eq!(
             network.inner.layers[0].weights,
             array![
