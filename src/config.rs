@@ -12,7 +12,7 @@ use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
 use tracing::debug;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone)]
 pub struct Config {
     #[arg(long, required = true)]
     dataset_path: PathBuf,
@@ -23,7 +23,7 @@ pub struct Config {
     #[arg(short, long, default_value_t = 256)]
     pub batch_size: usize,
     #[arg(short, long, default_value_t = 1e-1)]
-    pub learning_rate: f64,
+    pub learning_rate: f32,
 }
 
 type SerializationError = postcard::Error;

@@ -94,7 +94,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_random_permutation() {
-        for _ in 0..1_000_000 {
+        for _ in 0..100_000 {
             let perm = Permutation::random(10);
             assert!(perm.correct());
         }

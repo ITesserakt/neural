@@ -1,4 +1,4 @@
-mod config;
+pub mod config;
 
 use crate::differentiation::{FrozenRecord, Record, WengertList, WengertListPool};
 use crate::function_v2::{
@@ -11,13 +11,15 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, Linalg
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
 use ndarray_rand::RandomExt;
-use num_traits::{Float, Zero};
-use object_pool::Reusable;
+use num_traits::{Float, One, Zero};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
+use std::thread::current;
+use std::time::Instant;
+use tracing::{debug, instrument, trace};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -51,7 +53,7 @@ impl<T> NetworkData<T> {
 
     fn empty() -> Self {
         Self {
-            tapes: WengertListPool::new(rayon::max_num_threads()),
+            tapes: WengertListPool::new(1),
             layers: SmallVec::new(),
         }
     }
@@ -278,6 +280,47 @@ where
         y_pred
     }
 
+    #[instrument(skip(self))]
+    fn copy_to_tape<'a>(
+        &self,
+        tape: &'a WengertList<T>,
+    ) -> (
+        TempStorage<OnceDifferentiableFunction<T>>,
+        TempStorage<Parameters<Record<'a, T>>>,
+    )
+    where
+        T: Clone + Zero,
+    {
+        self.inner
+            .layers
+            .iter()
+            .map(|it| it.clone().write_to_tape(&*tape))
+            .unzip()
+    }
+
+    #[instrument(skip_all)]
+    fn predict_with_recording<G>(
+        &self,
+        xs: ArrayView2<T>,
+        fs: impl IntoIterator<Item = G>,
+        ps: &[Parameters<Record<'static, T>>],
+    ) -> Array2<Record<'static, T>>
+    where
+        G: OnceDifferentiableFunctionOps<T>,
+        T: Clone + LinalgScalar + Neg<Output = T> + Float + Debug,
+    {
+        let mut current = xs.mapv(Record::constant);
+        for (f, p) in fs.into_iter().zip(ps) {
+            let mut a = p.weights.dot(&current);
+            Zip::from(a.columns_mut()).for_each(|mut col| col.scaled_add(Record::one(), &p.biases));
+            let z = a.mapv_into(|x| x.unary(|x| f.function(x), |x| f.derivative(x)));
+            current = z;
+        }
+        let mut y_pred = current;
+        Zip::from(y_pred.columns_mut()).for_each(|col| self.state.output.call(col));
+        y_pred
+    }
+
     pub fn learn<'a, L>(
         &mut self,
         batched_input: ArrayView2<T>,
@@ -286,81 +329,36 @@ where
         loss: L,
     ) -> T
     where
-        T: LinalgScalar + Neg<Output = T> + Float + Sum,
-        T: Send + Sync,
+        T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
+        T: Send + Sync + Debug,
         F: Send + Sync,
-        L: Fn(Array1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
+        L: Fn(ArrayView1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
         L: Send + Sync,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
-        let params = self
-            .inner
-            .layers
-            .iter()
-            .cloned()
-            .collect::<TempStorage<_>>();
-        let (tx, rx) = std::sync::mpsc::channel();
+        let tape = self.inner.tapes.acquire();
+        tape.clear();
 
-        let compute_gradients =
-            |tape: &mut Reusable<&'static WengertList<T>>,
-             (x, y): (ArrayView1<T>, ArrayView1<T>)| {
-                tape.clear();
-                let (fs, ps) = params
-                    .iter()
-                    .map(|it| it.clone().write_to_tape(tape))
-                    .unzip::<_, _, TempStorage<_>, TempStorage<_>>();
+        let (fs, ps) = self.copy_to_tape(&*tape);
+        let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
 
-                let mut current = x.mapv(Record::constant);
-                for (f, p) in fs.iter().zip(&ps) {
-                    let a = p.weights.dot(&current) + &p.biases;
-                    let z = a.mapv_into(|x| x.unary(|x| f.function(x), |x| f.derivative(x)));
-                    current = z;
-                }
-                let mut y_pred = current;
-                self.state.output.call(y_pred.view_mut());
-                let loss_value = loss(y_pred, y);
+        let total_loss = Zip::from(y_pred.columns())
+            .and(batched_target.rows())
+            .fold(Record::zero(), |acc, yp, yr| acc + loss(yp, yr));
 
-                let ds = loss_value.derivatives();
+        let ds = total_loss.derivatives();
+        let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
 
-                (
-                    ps.into_iter()
-                        .map(|it| it.freeze())
-                        .collect::<TempStorage<_>>(),
-                    ds,
-                    loss_value.number,
-                )
-            };
+        for (layer, p) in self.inner.layers.iter_mut().zip(ps) {
+            layer
+                .weights
+                .zip_mut_with(&p.weights, |x, y| *x += factor * ds[y]);
+            layer
+                .biases
+                .zip_mut_with(&p.biases, |x, y| *x += factor * ds[y]);
+        }
 
-        let apply_gradients = || {
-            let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
-            for income in rx {
-                for (layer, g) in self.inner.layers.iter_mut().zip(income) {
-                    let g: Parameters<T> = g;
-                    layer.weights.scaled_add(factor, &g.weights);
-                    layer.biases.scaled_add(factor, &g.biases);
-                }
-            }
-        };
-
-        let (total_loss, _) = rayon::join(
-            || {
-                Zip::from(batched_input.rows())
-                    .and(batched_target.rows())
-                    .into_par_iter()
-                    .map_init(|| self.inner.tapes.acquire(), compute_gradients)
-                    .map_with(tx, |tx, (ps, ds, loss)| {
-                        _ = tx.send(ps.into_iter().map(move |p| Parameters {
-                            weights: p.weights.map(|pw| ds[pw]),
-                            biases: p.biases.map(|pb| ds[pb]),
-                        }));
-                        loss
-                    })
-                    .sum::<T>()
-            },
-            apply_gradients,
-        );
-
-        total_loss
+        total_loss.number
     }
 }
 
@@ -370,10 +368,20 @@ mod tests {
     use crate::differentiation::{Record, WengertListPool};
     use crate::function_v2::Linear;
     use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
-    use ndarray::{array, Array1, Array2, ArrayView1, Zip};
-    use ndarray_linalg::{aclose, assert_aclose};
+    use ndarray::{array, Array1, Array2, ArrayBase, ArrayView1, Data, Dimension, Zip};
+    use ndarray_linalg::{aclose, Scalar};
     use ndarray_rand::rand::prelude::StdRng;
     use smallvec::smallvec;
+
+    fn aclose_array<T: Scalar, D: Dimension>(
+        actual: ArrayBase<impl Data<Elem = T>, D>,
+        expected: ArrayBase<impl Data<Elem = T>, D>,
+        atol: T::Real,
+    ) {
+        Zip::from(&actual)
+            .and(&expected)
+            .for_each(|a, e| aclose(*a, *e, atol))
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -392,7 +400,7 @@ mod tests {
         aclose(d[(0, 2)], c[0], 1e-15);
     }
 
-    fn sse<'a>(yp: Array1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
+    fn sse<'a>(yp: ArrayView1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
         Zip::from(&yp)
             .and(&yr)
             .fold(Record::constant(0.0), |acc, &yp, &yr| {
@@ -460,34 +468,43 @@ mod tests {
         let y_pred = network.predict_many(xs.view()).reversed_axes();
         let loss_before = Zip::from(y_pred.rows())
             .and(ys.rows())
-            .map_collect(|yp, yr| sse(yp.mapv(Record::constant), yr).number);
-        assert_aclose!(loss_before[0], 1.0, 1e-15);
-        assert_aclose!(loss_before[1], 0.5800256583859735, 1e-15);
+            .map_collect(|yp, yr| sse(yp.mapv(Record::constant).view(), yr).number);
+        aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
         let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
-        assert_eq!(
-            network.inner.layers[0].weights,
+        aclose_array(
+            network.inner.layers[0].weights.view(),
             array![
                 [0.9920037498943847, 0.9920037498943847],
                 [0.9920037498943847, 0.9920037498943847]
-            ]
+            ],
+            1e-15,
         );
-        assert_eq!(
-            network.inner.layers[0].biases,
-            array![-0.03299625010561531, -0.03299625010561531]
+        aclose_array(
+            network.inner.layers[0].biases.view(),
+            array![-0.03299625010561531, -0.03299625010561531],
+            1e-15,
         );
-        assert_eq!(
-            network.inner.layers[1].weights,
-            array![[0.882919009282913, 0.882919009282913]]
+        aclose_array(
+            network.inner.layers[1].weights.view(),
+            array![[0.882919009282913, 0.882919009282913]],
+            1e-15,
         );
-        assert_eq!(network.inner.layers[1].biases, array![-0.17615941559557646]);
+        aclose_array(
+            network.inner.layers[1].biases.view(),
+            array![-0.17615941559557646],
+            1e-15,
+        );
 
         let y_pred = network.predict_many(xs.view()).reversed_axes();
         let loss_after = Zip::from(y_pred.rows())
             .and(ys.rows())
-            .map_collect(|yp, yr| sse(yp.mapv(Record::constant), yr).number);
-        assert_aclose!(loss_after[0], 0.4791330969810544, 1e-15);
-        assert_aclose!(loss_after[1], 0.13684982266400145, 1e-15);
+            .map_collect(|yp, yr| sse(yp.mapv(Record::constant).view(), yr).number);
+        aclose_array(
+            loss_after,
+            array![0.4791330969810544, 0.13684982266400145],
+            1e-15,
+        );
     }
 }

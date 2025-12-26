@@ -83,7 +83,7 @@
 use ndarray::{Array1, ArrayBase, ArrayView1, Data, Ix1};
 use num_traits::{ConstOne, ConstZero, One, ToPrimitive, Zero};
 use std::cell::RefCell;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::ops::{Add, Mul};
 use object_pool::Reusable;
 use tracing::debug;
@@ -350,7 +350,6 @@ pub type Index = u32;
  * in safe Rust because each mutable borrow of the WengertList is dropped at the end of each
  * Record method call, and you can't call two methods simulatenously without threading.
  */
-#[derive(Debug)]
 pub struct WengertList<T> {
     // It is neccessary to wrap the vec in a RefCell to allow for mutating
     // this list from immutable references held by each
@@ -376,8 +375,20 @@ impl<T: 'static> Drop for WengertListPool<T> {
         debug!("Total allocated tapes: {}", self.0.len());
         while let Some(tape) = self.0.try_pull() {
             let (_, tape) = Reusable::detach(tape);
-            tape.operations.take();
+            debug!(?tape, "Dropping tape");
+            _ = tape.operations.take();
         }
+    }
+}
+
+impl<T> Debug for WengertList<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let ops = self.operations.borrow();
+
+        f.debug_struct("WengertList")
+            .field("capacity", &ops.capacity())
+            .field("len", &ops.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -523,7 +534,6 @@ impl<T: Clone> Clone for Operation<T> {
  * [source code](https://github.com/Rufflewind/revad/blob/master/src/tape.rs) were invaluable
  * in providing understanding on how to implement Reverse Mode Automatic Differentiation.
  */
-#[derive(Debug)]
 #[repr(C)]
 pub struct Record<'a, T> {
     // A record consists of a number used in the forward pass, as
@@ -545,7 +555,6 @@ pub struct Record<'a, T> {
     pub index: Index,
 }
 
-#[derive(Debug)]
 #[repr(C)]
 pub struct FrozenRecord<T: 'static> {
     pub number: T,
@@ -553,6 +562,18 @@ pub struct FrozenRecord<T: 'static> {
     /// If value was transmuted from ordinary `[Record<T>]` here will be potentially dangling pointer.
     _history: Option<&'static std::convert::Infallible>,
     pub index: Index,
+}
+
+impl<T: Debug> Debug for Record<'_, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(f)
+    }
+}
+
+impl<T: Debug> Debug for FrozenRecord<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(f)
+    }
 }
 
 /**
