@@ -97,6 +97,10 @@ impl<T> ComputationGraph<T> {
 
     fn reset(&self) {
         *self.add_idx.write().expect("error") = 0;
+        self.nodes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     pub fn get_backwards_mode_grad(&self, node_idx_enum: NodeIdx) -> Derivatives<'_, T>
@@ -482,6 +486,7 @@ impl NodeIdx {
 pub struct GlobalComputationGraph<T: 'static>(&'static ComputationGraph<T>);
 
 impl<T> GlobalComputationGraph<T> {
+    #[inline(always)]
     pub(super) fn get() -> GlobalComputationGraph<T> {
         fn build_graph<T>() -> NonNull<()> {
             let graph = ComputationGraph::<T>::new();
@@ -540,14 +545,9 @@ impl<T> GlobalComputationGraph<T> {
     }
 
     #[inline(always)]
-    pub fn add_unary(
-        &self,
-        parent: Adr<T>,
-        node_type: NodeType,
-        value: T,
-    ) -> Adr<T>
+    pub fn add_unary(&self, parent: Adr<T>, node_type: NodeType, value: T) -> Adr<T>
     where
-        T: Clone + Zero
+        T: Clone + Zero,
     {
         self.0.add_node(
             node_type,
@@ -555,19 +555,13 @@ impl<T> GlobalComputationGraph<T> {
             Some(parent.number),
             None,
             Some(parent.node_idx),
-            None
+            None,
         )
     }
 
-    pub fn add_binary(
-        &self,
-        a: Adr<T>,
-        b: Adr<T>,
-        node_type: NodeType,
-        value: T
-    ) -> Adr<T>
+    pub fn add_binary(&self, a: Adr<T>, b: Adr<T>, node_type: NodeType, value: T) -> Adr<T>
     where
-        T: Clone + Zero
+        T: Clone + Zero,
     {
         self.0.add_node(
             node_type,
@@ -575,7 +569,7 @@ impl<T> GlobalComputationGraph<T> {
             Some(a.number),
             Some(b.number),
             Some(a.node_idx),
-            Some(b.node_idx)
+            Some(b.node_idx),
         )
     }
 
@@ -705,7 +699,12 @@ macro_rules! unary {
 macro_rules! binary {
     ($fn_name:ident $node_type:expr) => {
         fn $fn_name(self, rhs: Self) -> Self {
-            GlobalComputationGraph::get().add_binary(self, rhs, $node_type, T::$fn_name(self.number, rhs.number))
+            GlobalComputationGraph::get().add_binary(
+                self,
+                rhs,
+                $node_type,
+                T::$fn_name(self.number, rhs.number),
+            )
         }
     };
 }
@@ -883,15 +882,15 @@ impl<T> Indexed for Adr<T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::differentiation::{Adr, AD};
     use ndarray_linalg::aclose;
     use num_traits::real::Real;
     use num_traits::NumCast;
     use std::ops::{Add, Mul, Sub};
-    use crate::differentiation::{Adr, AD};
 
     fn k<T>(x: T, y: T) -> T
     where
-        T: NumCast + Add<Output=T> + Mul<Output=T> + Copy + Sub<Output=T>
+        T: NumCast + Add<Output = T> + Mul<Output = T> + Copy + Sub<Output = T>,
     {
         let three = T::from(3).unwrap();
 

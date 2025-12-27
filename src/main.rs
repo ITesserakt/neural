@@ -80,13 +80,9 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
             .zip(ys.axis_chunks_iter(Axis(0), self.config.batch_size))
         {
             let tape = self.tapes.acquire();
-            let loss = self.network.learn::<Record<_>>(
-                xs,
-                ys,
-                self.config.learning_rate,
-                cross_entropy,
-                *tape,
-            );
+            let loss = self
+                .network
+                .learn(xs, ys, self.config.learning_rate, cross_entropy, *tape);
 
             message.clear();
             write!(&mut message, "Loss = {loss:.3}").unwrap();

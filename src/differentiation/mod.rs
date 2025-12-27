@@ -119,7 +119,7 @@ impl<I: Indexed, T> IndexMut<&I> for Derivatives<'_, T> {
 }
 
 pub trait AD<T>: Num + LinalgScalar {
-    type Tape: Copy;
+    type Tape: ADTape<T>;
     
     fn constant(value: T) -> Self;
     fn variable(value: T, tape: Self::Tape) -> Self;
@@ -128,6 +128,10 @@ pub trait AD<T>: Num + LinalgScalar {
     fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self;
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R;
     fn unwrap(self) -> T;
+}
+
+pub trait ADTape<T>: Copy {
+    type AD: AD<T>;
 }
 
 impl<'a, T> AD<T> for Record<'a, T>
@@ -197,6 +201,21 @@ where
         self.number
     }
 }
+
+impl<'a, T> ADTape<T> for &'a WengertList<T>
+where 
+    Record<'a, T>: AD<T>
+{
+    type AD = Record<'a, T>;
+}
+
+impl<T> ADTape<T> for ()
+where 
+    Adr<T>: AD<T>
+{
+    type AD = Adr<T>;
+}
+
 
 #[cfg(test)]
 #[should_panic]

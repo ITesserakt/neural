@@ -1,6 +1,6 @@
 pub mod config;
 
-use crate::differentiation::{FrozenRecord, Indexed, Record, AD};
+use crate::differentiation::{ADTape, FrozenRecord, Indexed, Record, AD};
 use crate::function_v2::{
     ArrayFunction, Exp, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
     WeightsInitialization,
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::iter::Sum;
-use std::ops::{AddAssign, Deref, DerefMut, Neg};
+use std::ops::{AddAssign, Deref, DerefMut, Mul, Neg};
 use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,16 +294,16 @@ where
             .unzip()
     }
 
-    fn predict_with_recording<G, A: AD<T>>(
+    fn predict_with_recording<G, A>(
         &self,
         xs: ArrayView2<T>,
         fs: impl IntoIterator<Item = G>,
         ps: &[Parameters<A>],
     ) -> Array2<A>
     where
-        A: Exp,
+        A: AD<T> + Exp,
         G: OnceDifferentiableFunctionOps<T>,
-        T: Clone + LinalgScalar + Neg<Output = T> + Float + Debug,
+        T: Clone,
     {
         let mut current = xs.mapv(A::constant);
         for (f, p) in fs.into_iter().zip(ps) {
@@ -323,7 +323,7 @@ where
         learning_rate: T,
         gradients: impl IntoIterator<Item = Parameters<A>>,
     ) where
-        T: Float + AddAssign,
+        T: AddAssign + Float,
         A: AD<T> + Indexed,
     {
         total_loss.with_derivatives(move |ds| {
@@ -338,19 +338,18 @@ where
         });
     }
 
-    pub fn learn<A>(
+    pub fn learn<A, Tape>(
         &mut self,
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
         learning_rate: T,
-        loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A + Send + Sync,
-        tape: A::Tape,
+        loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A,
+        tape: Tape,
     ) -> T
     where
-        T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
-        T: Send + Sync + Debug,
-        F: Send + Sync,
-        A: AD<T> + Exp + Indexed,
+        T: Float + AddAssign,
+        A: AD<T, Tape = Tape> + Exp + Indexed,
+        Tape: ADTape<T, AD = A>,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
         A::reset(tape);
@@ -434,7 +433,7 @@ mod tests {
         let tape = WengertList::leak();
         for _ in 0..900 {
             tape.clear();
-            network.learn::<Record<_>>(xs.view(), ys.view(), 1e-1, sse, &tape);
+            network.learn(xs.view(), ys.view(), 1e-1, sse, tape);
             println!("{:.3}", network.predict(array![0.1, 0.2]));
         }
 
@@ -480,7 +479,7 @@ mod tests {
         aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
         let tape = WengertList::leak();
-        let loss_right_in = network.learn::<Record<_>>(xs.view(), ys.view(), 0.1, sse, tape);
+        let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse, tape);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
         aclose_array(
             network.inner.layers[0].weights.view(),
