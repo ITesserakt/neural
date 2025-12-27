@@ -123,12 +123,11 @@ pub trait AD<T>: Num + LinalgScalar {
     
     fn constant(value: T) -> Self;
     fn variable(value: T, tape: Self::Tape) -> Self;
+    fn reset(tape: Self::Tape);
 
     fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self;
-
-    fn reset(&self);
-
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R;
+    fn unwrap(self) -> T;
 }
 
 impl<'a, T> AD<T> for Record<'a, T>
@@ -146,19 +145,21 @@ where
         Record::variable(value, tape)
     }
 
+    fn reset(tape: Self::Tape) {
+        tape.clear();
+    }
+
     #[inline]
     fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self {
         self.unary(|x| f.function(x), |x| f.derivative(x))
     }
 
-    fn reset(&self) {
-        if let Some(history) = self.history {
-            history.clear();
-        }
-    }
-
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
         f(self.derivatives())
+    }
+
+    fn unwrap(self) -> T {
+        self.number
     }
 }
 
@@ -177,19 +178,23 @@ where
         Adr::variable(value)
     }
 
+    fn reset(_: Self::Tape) {
+        GlobalComputationGraph::<T>::get().reset();
+    }
+
     #[inline]
     fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self {
         f.ad_function(self)
-    }
-
-    fn reset(&self) {
-        GlobalComputationGraph::<T>::get().reset();
     }
 
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
         let graph = GlobalComputationGraph::<T>::get();
         let ds = graph.get_backwards_mode_grad(self.node_idx);
         f(ds)
+    }
+
+    fn unwrap(self) -> T {
+        self.number
     }
 }
 

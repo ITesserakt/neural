@@ -1,6 +1,6 @@
-use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
+use crate::activation::{linear_fn, sigmoid_fn};
 use crate::config::Config;
-use crate::differentiation::{Adr, Record, AD};
+use crate::differentiation::{Adr, Record, WengertListPool, AD};
 use crate::function_v2::{ArrayFunction, OnceDifferentiableFunction, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
@@ -38,6 +38,7 @@ struct Env<'a, T: 'static, F> {
     test_xs: ArrayView2<'a, T>,
     test_ys: Array2<T>,
     config: Config,
+    tapes: WengertListPool<T>,
 }
 
 impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
@@ -49,6 +50,7 @@ impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
             test_xs: Mnist::features_flattened(mnist.test().features()),
             test_ys: Mnist::targets_unrolled(mnist.test().targets()),
             config,
+            tapes: WengertListPool::new(1),
         }
     }
 }
@@ -77,9 +79,14 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
             .axis_chunks_iter(Axis(0), self.config.batch_size)
             .zip(ys.axis_chunks_iter(Axis(0), self.config.batch_size))
         {
-            let loss = self
-                .network
-                .learn(xs, ys, self.config.learning_rate, cross_entropy);
+            let tape = self.tapes.acquire();
+            let loss = self.network.learn::<Record<_>>(
+                xs,
+                ys,
+                self.config.learning_rate,
+                cross_entropy,
+                *tape,
+            );
 
             message.clear();
             write!(&mut message, "Loss = {loss:.3}").unwrap();

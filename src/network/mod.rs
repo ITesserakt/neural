@@ -1,8 +1,6 @@
 pub mod config;
 
-use crate::differentiation::{
-    Adr, FrozenRecord, Indexed, Record, WengertListPool, AD,
-};
+use crate::differentiation::{FrozenRecord, Indexed, Record, AD};
 use crate::function_v2::{
     ArrayFunction, Exp, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
     WeightsInitialization,
@@ -37,7 +35,6 @@ const INLINE_LAYER_BUFFER_SIZE: usize = 3;
 type TempStorage<T> = SmallVec<[T; INLINE_LAYER_BUFFER_SIZE]>;
 
 pub(super) struct NetworkData<T: 'static> {
-    tapes: WengertListPool<T>,
     layers: SmallVec<[Layer<T>; INLINE_LAYER_BUFFER_SIZE]>,
 }
 
@@ -52,7 +49,6 @@ impl<T> NetworkData<T> {
 
     fn empty() -> Self {
         Self {
-            tapes: WengertListPool::new(1),
             layers: SmallVec::new(),
         }
     }
@@ -107,13 +103,10 @@ impl<T> Parameters<Record<'_, T>> {
 }
 
 impl<T: 'static> Layer<T> {
-    fn write_to_tape<A>(
-        self,
-        tape: A::Tape,
-    ) -> (OnceDifferentiableFunction<T>, Parameters<A>)
+    fn write_to_tape<A>(self, tape: A::Tape) -> (OnceDifferentiableFunction<T>, Parameters<A>)
     where
         T: Zero + Clone,
-        A: AD<T>
+        A: AD<T>,
     {
         (
             self.activation,
@@ -345,70 +338,40 @@ where
         });
     }
 
-    pub fn learn<L>(
+    pub fn learn<A>(
         &mut self,
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
         learning_rate: T,
-        loss: L,
+        loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A + Send + Sync,
+        tape: A::Tape,
     ) -> T
     where
         T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
         T: Send + Sync + Debug,
         F: Send + Sync,
-        L: Fn(ArrayView1<Record<'static, T>>, ArrayView1<T>) -> Record<'static, T>,
-        L: Send + Sync,
+        A: AD<T> + Exp + Indexed,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
-        let tape = self.inner.tapes.acquire();
-        tape.clear();
+        A::reset(tape);
 
-        let (fs, ps) = self.copy_to_tape(*tape);
-        drop(tape);
+        let (fs, ps) = self.copy_to_tape(tape);
         let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
 
         let total_loss = Zip::from(y_pred.columns())
             .and(batched_target.rows())
-            .fold(Record::zero(), |acc, yp, yr| acc + loss(yp, yr));
+            .fold(A::zero(), |acc, yp, yr| acc + loss(yp, yr));
 
         let factor = T::one() / T::from(batched_target.nrows()).unwrap();
         self.apply_gradients(total_loss, -learning_rate * factor, ps);
-        total_loss.number
-    }
-
-    pub fn learn_lazy<L>(
-        &mut self,
-        batched_input: ArrayView2<T>,
-        batched_target: ArrayView2<T>,
-        learning_rate: T,
-        loss: L,
-    ) -> T
-    where
-        T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
-        T: Send + Sync + Debug,
-        F: Send + Sync,
-        L: Fn(ArrayView1<Adr<T>>, ArrayView1<T>) -> Adr<T>,
-        L: Send + Sync,
-    {
-        debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
-
-        let (fs, ps) = self.copy_to_tape(());
-        let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
-
-        let total_loss = Zip::from(y_pred.columns())
-            .and(batched_target.rows())
-            .fold(Adr::zero(), |acc, yp, yr| acc + loss(yp, yr));
-
-        let factor = T::one() / T::from(batched_target.nrows()).unwrap();
-        self.apply_gradients(total_loss, -learning_rate * factor, ps);
-        total_loss.number
+        total_loss.unwrap()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
-    use crate::differentiation::{Record, WengertListPool, AD};
+    use crate::differentiation::{Record, WengertList, AD};
     use crate::function_v2::Linear;
     use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
     use ndarray::{array, Array1, Array2, ArrayBase, ArrayView1, Data, Dimension, Zip};
@@ -468,8 +431,10 @@ mod tests {
         ];
         let ys = array![[3.0], [1.2], [1.0], [2.5], [0.08]];
 
+        let tape = WengertList::leak();
         for _ in 0..900 {
-            network.learn(xs.view(), ys.view(), 1e-1, sse);
+            tape.clear();
+            network.learn::<Record<_>>(xs.view(), ys.view(), 1e-1, sse, &tape);
             println!("{:.3}", network.predict(array![0.1, 0.2]));
         }
 
@@ -482,7 +447,6 @@ mod tests {
     fn test_network_epoches() {
         let mut network = Network {
             inner: NetworkData {
-                tapes: WengertListPool::new(1),
                 layers: smallvec![
                     Layer {
                         size: 2,
@@ -515,7 +479,8 @@ mod tests {
             .map_collect(|yp, yr| sse(yp.mapv(Record::constant).view(), yr).number);
         aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
-        let loss_right_in = network.learn_lazy(xs.view(), ys.view(), 0.1, sse);
+        let tape = WengertList::leak();
+        let loss_right_in = network.learn::<Record<_>>(xs.view(), ys.view(), 0.1, sse, tape);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
         aclose_array(
             network.inner.layers[0].weights.view(),
