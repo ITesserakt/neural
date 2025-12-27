@@ -150,6 +150,7 @@ impl<DF: Dimension, DT: Dimension, T: Element> Set<'_, DF, DT, T> {
         &self.name
     }
 
+    #[allow(dead_code)]
     pub fn length(&self) -> usize {
         self.num_rows
     }

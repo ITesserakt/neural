@@ -1,29 +1,27 @@
-use crate::activation::{linear_fn, sigmoid_fn};
+use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
 use crate::config::Config;
-use crate::differentiation::Record;
-use crate::function_v2::{ArrayFunction, Softmax};
+use crate::differentiation::{Adr, Record, AD};
+use crate::function_v2::{ArrayFunction, OnceDifferentiableFunction, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
 use clap::Parser;
 use indicatif::style::TemplateError;
-use indicatif::{ProgressIterator, ProgressStyle};
+use indicatif::ProgressStyle;
 use ndarray::{Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
 use ndarray_linalg::Scalar;
 use num_traits::{Float, One, Zero};
 use numpy::Element;
 use std::error::Error;
 use std::fmt::Write;
-use std::ops::DivAssign;
+use std::ops::{DivAssign, Neg};
 use tracing::{instrument, Level, Span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use tracing_indicatif::IndicatifLayer;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Layer;
 
 mod activation;
 mod config;
@@ -73,6 +71,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
+        let mut message = String::new();
         Span::current().pb_set_length(xs.nrows() as u64 / self.config.batch_size as u64);
         for (xs, ys) in xs
             .axis_chunks_iter(Axis(0), self.config.batch_size)
@@ -82,12 +81,14 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
                 .network
                 .learn(xs, ys, self.config.learning_rate, cross_entropy);
 
-            Span::current().pb_set_message(&format!("Loss = {loss:.3}"));
+            message.clear();
+            write!(&mut message, "Loss = {loss:.3}").unwrap();
+            Span::current().pb_set_message(&message);
             Span::current().pb_inc(1);
         }
     }
 
-    #[instrument(skip_all, fields(loss = tracing::field::Empty))]
+    #[instrument(skip_all)]
     fn epoch_iterations(&mut self)
     where
         F: ArrayFunction<Ix1> + Send + Sync,
@@ -108,25 +109,26 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     }
 }
 
-fn cross_entropy<'a, T>(yp: ArrayView1<Record<'a, T>>, yr: ArrayView1<T>) -> Record<'a, T>
+fn cross_entropy<'a, T, A>(yp: ArrayView1<A>, yr: ArrayView1<T>) -> A
 where
-    T: Copy + Float + DivAssign + One,
+    T: Copy + Float + DivAssign + One + 'static,
+    A: AD<T> + Neg<Output = A>,
 {
-    -Zip::from(&yp)
-        .and(&yr)
-        .fold(Record::zero(), |acc, yp, &yr| {
-            acc + Record::constant(yr)
-                * yp.unary(
-                    |x| (x + T::epsilon()).ln(),
-                    |x| T::one() / (x + T::epsilon()),
-                )
-        })
+    let ln_fn = OnceDifferentiableFunction::from_static(
+        &|x: T| (x + T::epsilon()).ln(),
+        &|x: T| T::one() / (x + T::epsilon()),
+        &|x| (x + Adr::epsilon()).ln(),
+    );
+
+    -Zip::from(&yp).and(&yr).fold(A::zero(), |acc, yp, &yr| {
+        acc + A::constant(yr) * yp.apply_function(&ln_fn)
+    })
 }
 
 fn init_tracing() -> Result<(), TemplateError> {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
-            "{span_child_prefix} {span_name} [{elapsed_precise}] [{bar:.cyan/blue}] {{{msg}}} ({eta})",
+            "{span_child_prefix} {span_name} [{elapsed_precise}] [{bar:.cyan/blue}] {{{msg}}} ({pos}/{len} | {eta})",
         )?
         .progress_chars("#>-"),
     );
@@ -150,7 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mnist = config.load_mnist_dataset()?;
 
     let network = Network::new(28 * 28)
-        .push_hidden_layer(64, sigmoid_fn())
+        .push_hidden_layer(32, sigmoid_fn())
         .push_output_layer(10, linear_fn())
         .map_output(Softmax);
 

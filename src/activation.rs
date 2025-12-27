@@ -1,20 +1,25 @@
 #![allow(dead_code)]
 
+use crate::differentiation::Adr;
 use crate::function_v2::OnceDifferentiableFunction;
 use num_traits::{Float, One, Zero};
 
 pub fn sigmoid_fn<T: Float>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(&|x: T| T::one() / (T::one() + T::exp(-x)), &|x| {
-        let z = T::one() / (T::one() + T::exp(-x));
-        z * (T::one() - z)
-    })
+    OnceDifferentiableFunction::from_static(
+        &|x: T| T::one() / (T::one() + T::exp(-x)),
+        &|x| {
+            let z = T::one() / (T::one() + T::exp(-x));
+            z * (T::one() - z)
+        },
+        &|x| Adr::one() / (Adr::one() + (-x).exp()),
+    )
 }
 
 pub fn linear_fn<T: One>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(&|x: T| x, &|_| T::one())
+    OnceDifferentiableFunction::from_static(&|x: T| x, &|_| T::one(), &|x| x)
 }
 
-pub fn relu_fn<T: PartialOrd + Zero + One>() -> OnceDifferentiableFunction<T> {
+pub fn relu_fn<T: PartialOrd + Zero + One + Clone>() -> OnceDifferentiableFunction<T> {
     OnceDifferentiableFunction::from_static(
         &|x: T| {
             if x >= T::zero() { x } else { T::zero() }
@@ -22,14 +27,21 @@ pub fn relu_fn<T: PartialOrd + Zero + One>() -> OnceDifferentiableFunction<T> {
         &|x| {
             if x >= T::zero() { T::one() } else { T::zero() }
         },
+        &|x| {
+            if x >= Adr::zero() { x } else { Adr::zero() }
+        },
     )
 }
 
 pub fn softplus<T: Float>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(&|x: T| x.exp().ln_1p(), &|x| {
-        let exp = x.exp();
-        exp / (T::one() + exp)
-    })
+    OnceDifferentiableFunction::from_static(
+        &|x: T| x.exp().ln_1p(),
+        &|x| {
+            let exp = x.exp();
+            exp / (T::one() + exp)
+        },
+        &|x| x.exp().ln_1p(),
+    )
 }
 
 pub fn elu<T: Float + Send + Sync>(alpha: T) -> OnceDifferentiableFunction<T> {
@@ -44,14 +56,21 @@ pub fn elu<T: Float + Send + Sync>(alpha: T) -> OnceDifferentiableFunction<T> {
                 alpha * x.exp()
             }
         },
+        move |x| {
+            if x > Adr::zero() {
+                x
+            } else {
+                Adr::constant(alpha) * x.exp_m1()
+            }
+        },
     )
 }
 
 #[cfg(test)]
 mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn, softplus};
-    use ndarray_linalg::aclose;
     use crate::function_v2::OnceDifferentiableFunctionOps;
+    use ndarray_linalg::aclose;
 
     #[test]
     fn test_sigmoid_derivative() {

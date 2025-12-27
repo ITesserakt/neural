@@ -1,11 +1,10 @@
 #![allow(dead_code)]
 
-use crate::differentiation::Record;
+use crate::differentiation::{Adr, Record};
 use ndarray::{ArrayViewMut, Dimension, LinalgScalar};
 use ndarray_rand::rand_distr::{Distribution, Normal, StandardNormal};
 use num_traits::{Float, FromPrimitive, Zero};
 use std::sync::Arc;
-use num_traits::real::Real;
 
 enum Storage<T: ?Sized + 'static> {
     Boxed(Arc<T>),
@@ -16,12 +15,15 @@ pub trait OnceDifferentiableFunctionOps<T> {
     fn function(&self, x: T) -> T;
     fn derivative(&self, x: T) -> T;
 
+    fn ad_function(&self, x: Adr<T>) -> Adr<T>;
+
     fn into_boxed(self) -> OnceDifferentiableFunction<T>;
 }
 
 pub struct OnceDifferentiableFunction<T: 'static> {
     function: Storage<dyn Fn(T) -> T + Send + Sync>,
     derivative: Storage<dyn Fn(T) -> T + Send + Sync>,
+    ad_function: Storage<dyn Fn(Adr<T>) -> Adr<T> + Send + Sync>
 }
 
 pub trait WeightsInitialization<T> {
@@ -121,37 +123,43 @@ impl<T: 'static> Clone for OnceDifferentiableFunction<T> {
         Self {
             function: self.function.clone(),
             derivative: self.derivative.clone(),
+            ad_function: self.ad_function.clone()
         }
     }
 }
 
 impl<T: 'static> OnceDifferentiableFunction<T> {
-    pub fn new<F, G>(f: F, df: G) -> Self
+    pub fn new<F, G, H>(f: F, df: G, adr_f: H) -> Self
     where
         F: Fn(T) -> T + 'static + Send + Sync,
         G: Fn(T) -> T + 'static + Send + Sync,
+        H: Fn(Adr<T>) -> Adr<T> + 'static + Send + Sync
     {
         Self {
             function: Storage::Boxed(Arc::new(f)),
             derivative: Storage::Boxed(Arc::new(df)),
+            ad_function: Storage::Boxed(Arc::new(adr_f)),
         }
     }
 
-    pub fn from_static<F, G>(f: &'static F, df: &'static G) -> Self
+    pub fn from_static<F, G, H>(f: &'static F, df: &'static G, adr_f: &'static H) -> Self
     where
         F: Fn(T) -> T + Send + Sync,
         G: Fn(T) -> T + Send + Sync,
+        H: Fn(Adr<T>) -> Adr<T> + Send + Sync
     {
         Self {
             function: Storage::Static(f),
             derivative: Storage::Static(df),
+            ad_function: Storage::Static(adr_f)
         }
     }
 
-    pub fn apply<F, G>(self, f_map: F, df_map: G) -> OnceDifferentiableFunction<T>
+    pub fn apply<F, G, H>(self, f_map: F, df_map: G, adr_f_map: H) -> OnceDifferentiableFunction<T>
     where
         F: Fn(T) -> T + 'static + Send + Sync,
         G: Fn(T) -> T + 'static + Send + Sync,
+        H: Fn(Adr<T>) -> Adr<T> + 'static + Send + Sync,
     {
         OnceDifferentiableFunction::new(
             move |x| {
@@ -162,6 +170,12 @@ impl<T: 'static> OnceDifferentiableFunction<T> {
             },
             move |x| {
                 df_map(match &self.derivative {
+                    Storage::Boxed(f) => f(x),
+                    Storage::Static(f) => f(x),
+                })
+            },
+            move |x| {
+                adr_f_map(match &self.ad_function {
                     Storage::Boxed(f) => f(x),
                     Storage::Static(f) => f(x),
                 })
@@ -184,6 +198,14 @@ impl<T> OnceDifferentiableFunctionOps<T> for OnceDifferentiableFunction<T> {
         match &self.derivative {
             Storage::Boxed(f) => f(x),
             Storage::Static(f) => f(x),
+        }
+    }
+
+    #[inline(always)]
+    fn ad_function(&self, x: Adr<T>) -> Adr<T> {
+        match &self.ad_function {
+            Storage::Boxed(f) => f(x),
+            Storage::Static(f) => f(x)
         }
     }
 

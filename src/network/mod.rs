@@ -1,25 +1,24 @@
 pub mod config;
 
-use crate::differentiation::{FrozenRecord, Record, WengertList, WengertListPool};
+use crate::differentiation::{
+    Adr, FrozenRecord, Indexed, Record, WengertListPool, AD,
+};
 use crate::function_v2::{
     ArrayFunction, Exp, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
     WeightsInitialization,
 };
 use crate::network::config::{Hidden, IntoLayerConfig, Ready};
-use ndarray::parallel::prelude::{IntoParallelIterator, ParallelIterator};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, LinalgScalar, Zip};
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
 use ndarray_rand::RandomExt;
-use num_traits::{Float, One, Zero};
+use num_traits::{Float, Zero};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::iter::Sum;
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
-use std::thread::current;
-use std::time::Instant;
-use tracing::{debug, instrument, trace};
+use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -84,6 +83,7 @@ impl<T> Parameters<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn zeros(output_size: usize, input_size: usize) -> Self
     where
         T: Zero + Clone,
@@ -96,6 +96,7 @@ impl<T> Parameters<T> {
 }
 
 impl<T> Parameters<Record<'_, T>> {
+    #[allow(dead_code)]
     #[inline(always)]
     fn freeze(self) -> Parameters<FrozenRecord<T>> {
         Parameters {
@@ -106,16 +107,17 @@ impl<T> Parameters<Record<'_, T>> {
 }
 
 impl<T: 'static> Layer<T> {
-    fn write_to_tape(
+    fn write_to_tape<A>(
         self,
-        tape: &'_ WengertList<T>,
-    ) -> (OnceDifferentiableFunction<T>, Parameters<Record<'_, T>>)
+        tape: A::Tape,
+    ) -> (OnceDifferentiableFunction<T>, Parameters<A>)
     where
         T: Zero + Clone,
+        A: AD<T>
     {
         (
             self.activation,
-            self.parameters.map(|x| Record::variable(x, tape)),
+            self.parameters.map(|x| A::variable(x, tape)),
         )
     }
 }
@@ -280,40 +282,41 @@ where
         y_pred
     }
 
-    #[instrument(skip(self))]
-    fn copy_to_tape<'a>(
+    #[instrument(skip_all)]
+    fn copy_to_tape<'a, A>(
         &self,
-        tape: &'a WengertList<T>,
+        tape: A::Tape,
     ) -> (
         TempStorage<OnceDifferentiableFunction<T>>,
-        TempStorage<Parameters<Record<'a, T>>>,
+        TempStorage<Parameters<A>>,
     )
     where
+        A: AD<T>,
         T: Clone + Zero,
     {
         self.inner
             .layers
             .iter()
-            .map(|it| it.clone().write_to_tape(&*tape))
+            .map(|it| it.clone().write_to_tape(tape))
             .unzip()
     }
 
-    #[instrument(skip_all)]
-    fn predict_with_recording<G>(
+    fn predict_with_recording<G, A: AD<T>>(
         &self,
         xs: ArrayView2<T>,
         fs: impl IntoIterator<Item = G>,
-        ps: &[Parameters<Record<'static, T>>],
-    ) -> Array2<Record<'static, T>>
+        ps: &[Parameters<A>],
+    ) -> Array2<A>
     where
+        A: Exp,
         G: OnceDifferentiableFunctionOps<T>,
         T: Clone + LinalgScalar + Neg<Output = T> + Float + Debug,
     {
-        let mut current = xs.mapv(Record::constant);
+        let mut current = xs.mapv(A::constant);
         for (f, p) in fs.into_iter().zip(ps) {
             let mut a = p.weights.dot(&current);
-            Zip::from(a.columns_mut()).for_each(|mut col| col.scaled_add(Record::one(), &p.biases));
-            let z = a.mapv_into(|x| x.unary(|x| f.function(x), |x| f.derivative(x)));
+            Zip::from(a.columns_mut()).for_each(|mut col| col.scaled_add(A::one(), &p.biases));
+            let z = a.mapv_into(|x| x.apply_function(&f));
             current = z;
         }
         let mut y_pred = current;
@@ -321,7 +324,28 @@ where
         y_pred
     }
 
-    pub fn learn<'a, L>(
+    fn apply_gradients<A>(
+        &mut self,
+        total_loss: A,
+        learning_rate: T,
+        gradients: impl IntoIterator<Item = Parameters<A>>,
+    ) where
+        T: Float + AddAssign,
+        A: AD<T> + Indexed,
+    {
+        total_loss.with_derivatives(move |ds| {
+            for (layer, p) in self.inner.layers.iter_mut().zip(gradients) {
+                layer
+                    .weights
+                    .zip_mut_with(&p.weights, |x, y| *x += learning_rate * ds[y]);
+                layer
+                    .biases
+                    .zip_mut_with(&p.biases, |x, y| *x += learning_rate * ds[y]);
+            }
+        });
+    }
+
+    pub fn learn<L>(
         &mut self,
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
@@ -332,32 +356,51 @@ where
         T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
         T: Send + Sync + Debug,
         F: Send + Sync,
-        L: Fn(ArrayView1<Record<'a, T>>, ArrayView1<T>) -> Record<'a, T>,
+        L: Fn(ArrayView1<Record<'static, T>>, ArrayView1<T>) -> Record<'static, T>,
         L: Send + Sync,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
         let tape = self.inner.tapes.acquire();
         tape.clear();
 
-        let (fs, ps) = self.copy_to_tape(&*tape);
+        let (fs, ps) = self.copy_to_tape(*tape);
+        drop(tape);
         let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
 
         let total_loss = Zip::from(y_pred.columns())
             .and(batched_target.rows())
             .fold(Record::zero(), |acc, yp, yr| acc + loss(yp, yr));
 
-        let ds = total_loss.derivatives();
-        let factor = -learning_rate / T::from(batched_target.nrows()).unwrap();
+        let factor = T::one() / T::from(batched_target.nrows()).unwrap();
+        self.apply_gradients(total_loss, -learning_rate * factor, ps);
+        total_loss.number
+    }
 
-        for (layer, p) in self.inner.layers.iter_mut().zip(ps) {
-            layer
-                .weights
-                .zip_mut_with(&p.weights, |x, y| *x += factor * ds[y]);
-            layer
-                .biases
-                .zip_mut_with(&p.biases, |x, y| *x += factor * ds[y]);
-        }
+    pub fn learn_lazy<L>(
+        &mut self,
+        batched_input: ArrayView2<T>,
+        batched_target: ArrayView2<T>,
+        learning_rate: T,
+        loss: L,
+    ) -> T
+    where
+        T: LinalgScalar + Neg<Output = T> + AddAssign + Float + Sum,
+        T: Send + Sync + Debug,
+        F: Send + Sync,
+        L: Fn(ArrayView1<Adr<T>>, ArrayView1<T>) -> Adr<T>,
+        L: Send + Sync,
+    {
+        debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
 
+        let (fs, ps) = self.copy_to_tape(());
+        let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
+
+        let total_loss = Zip::from(y_pred.columns())
+            .and(batched_target.rows())
+            .fold(Adr::zero(), |acc, yp, yr| acc + loss(yp, yr));
+
+        let factor = T::one() / T::from(batched_target.nrows()).unwrap();
+        self.apply_gradients(total_loss, -learning_rate * factor, ps);
         total_loss.number
     }
 }
@@ -365,7 +408,7 @@ where
 #[cfg(test)]
 mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
-    use crate::differentiation::{Record, WengertListPool};
+    use crate::differentiation::{Record, WengertListPool, AD};
     use crate::function_v2::Linear;
     use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
     use ndarray::{array, Array1, Array2, ArrayBase, ArrayView1, Data, Dimension, Zip};
@@ -400,12 +443,13 @@ mod tests {
         aclose(d[(0, 2)], c[0], 1e-15);
     }
 
-    fn sse<'a>(yp: ArrayView1<Record<'a, f64>>, yr: ArrayView1<f64>) -> Record<'a, f64> {
-        Zip::from(&yp)
-            .and(&yr)
-            .fold(Record::constant(0.0), |acc, &yp, &yr| {
-                acc + (yp - Record::constant(yr)) * (yp - Record::constant(yr))
-            })
+    fn sse<'a, A>(yp: ArrayView1<A>, yr: ArrayView1<f64>) -> A
+    where
+        A: AD<f64>,
+    {
+        Zip::from(&yp).and(&yr).fold(A::zero(), |acc, &yp, &yr| {
+            acc + (yp - A::constant(yr)) * (yp - A::constant(yr))
+        })
     }
 
     #[test]
@@ -471,7 +515,7 @@ mod tests {
             .map_collect(|yp, yr| sse(yp.mapv(Record::constant).view(), yr).number);
         aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
-        let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse);
+        let loss_right_in = network.learn_lazy(xs.view(), ys.view(), 0.1, sse);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
         aclose_array(
             network.inner.layers[0].weights.view(),
