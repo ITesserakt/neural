@@ -86,6 +86,7 @@ mod record_operations;
 mod trace;
 mod trace_operations;
 
+use std::collections::HashMap;
 use crate::differentiation::adr::GlobalComputationGraph;
 use crate::function_v2::OnceDifferentiableFunctionOps;
 pub use adr::Adr;
@@ -93,11 +94,11 @@ use ndarray::LinalgScalar;
 use num_traits::{Float, Num, One, Zero};
 use object_pool::Reusable;
 pub use record::{FrozenRecord, Record, WengertList, WengertListPool};
-use std::ops::{AddAssign, Index, IndexMut};
+use std::ops::{AddAssign, Index};
 pub use trace::Trace;
 
 pub struct Derivatives<'a, T> {
-    adjoints: Reusable<'a, Vec<T>>,
+    adjoints: Reusable<'a, HashMap<usize, T>>,
 }
 
 pub trait Indexed {
@@ -108,49 +109,39 @@ impl<I: Indexed, T> Index<&I> for Derivatives<'_, T> {
     type Output = T;
 
     fn index(&self, value: &I) -> &Self::Output {
-        &self.adjoints[value.index()]
+        &self.adjoints[&value.index()]
     }
 }
 
-impl<I: Indexed, T> IndexMut<&I> for Derivatives<'_, T> {
-    fn index_mut(&mut self, value: &I) -> &mut Self::Output {
-        &mut self.adjoints[value.index()]
-    }
-}
-
-pub trait AD<T>: Num + LinalgScalar {
+pub trait AD<'a, T>: Num + Copy {
     type Tape: ADTape<T>;
-    
+
     fn constant(value: T) -> Self;
-    fn variable(value: T, tape: Self::Tape) -> Self;
-    fn reset(tape: Self::Tape);
+    fn variable(value: T, tape: &'a Self::Tape) -> Self;
 
     fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self;
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R;
     fn unwrap(self) -> T;
 }
 
-pub trait ADTape<T>: Copy {
-    type AD: AD<T>;
+pub trait ADTape<T> {
+    type AD<'a>;
+
+    fn reset(&self);
 }
 
-impl<'a, T> AD<T> for Record<'a, T>
+impl<'a, T> AD<'a, T> for Record<'a, T>
 where
-    Self: Num + LinalgScalar,
-    T: Clone + Zero + One + 'static,
+    T: Float + 'static + AddAssign,
 {
-    type Tape = &'a WengertList<T>;
-    
+    type Tape = WengertList<T>;
+
     fn constant(value: T) -> Self {
         Record::constant(value)
     }
 
-    fn variable(value: T, tape: Self::Tape) -> Self {
+    fn variable(value: T, tape: &'a WengertList<T>) -> Record<'a, T> {
         Record::variable(value, tape)
-    }
-
-    fn reset(tape: Self::Tape) {
-        tape.clear();
     }
 
     #[inline]
@@ -167,23 +158,19 @@ where
     }
 }
 
-impl<T> AD<T> for Adr<T>
+impl<'a, T> AD<'a, T> for Adr<T>
 where
     Self: Num + LinalgScalar,
     T: Float + AddAssign,
 {
     type Tape = ();
-    
+
     fn constant(value: T) -> Self {
         Adr::constant(value)
     }
 
-    fn variable(value: T, _: Self::Tape) -> Self {
+    fn variable(value: T, _: &()) -> Self {
         Adr::variable(value)
-    }
-
-    fn reset(_: Self::Tape) {
-        GlobalComputationGraph::<T>::get().reset();
     }
 
     #[inline]
@@ -202,18 +189,26 @@ where
     }
 }
 
-impl<'a, T> ADTape<T> for &'a WengertList<T>
-where 
-    Record<'a, T>: AD<T>
+impl<T> ADTape<T> for WengertList<T>
+where
+    T: 'static
 {
-    type AD = Record<'a, T>;
+    type AD<'a> = Record<'a, T>;
+
+    fn reset(&self) {
+        self.clear();
+    }
 }
 
 impl<T> ADTape<T> for ()
-where 
-    Adr<T>: AD<T>
+where
+    T: 'static + Float + AddAssign
 {
-    type AD = Adr<T>;
+    type AD<'a> = Adr<T>;
+
+    fn reset(&self) {
+        GlobalComputationGraph::<T>::get().reset();
+    }
 }
 
 

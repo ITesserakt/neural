@@ -20,16 +20,6 @@ impl<'a, T: LowerExp> LowerExp for Record<'a, T> {
     }
 }
 
-impl<T: Clone> Clone for Record<'_, T> {
-    fn clone(&self) -> Self {
-        Self {
-            number: self.number.clone(),
-            history: self.history,
-            index: self.index,
-        }
-    }
-}
-
 impl<T: Copy> Copy for Record<'_, T> {}
 
 /**
@@ -166,37 +156,6 @@ where
             |_, y| T::one() / y,
             |x, y| -x / (y.clone() * y),
         )
-    }
-}
-
-impl<T> DivAssign for Record<'_, T>
-where
-    T: DivAssign + One + Clone + Div<Output = T> + Zero + Neg<Output = T>,
-{
-    fn div_assign(&mut self, rhs: Self) {
-        debug_assert!(same_list(self, &rhs));
-        self.number /= rhs.number.clone();
-        match (self.history, rhs.history) {
-            (None, None) => {}
-            (Some(history), None) => {
-                self.index = history.append_unary(self.index, T::one() / rhs.number);
-            }
-            (None, Some(history)) => {
-                self.history = Some(history);
-                self.index = history.append_unary(
-                    self.index,
-                    -self.number.clone() / (rhs.number.clone() * rhs.number),
-                );
-            }
-            (Some(history), Some(_)) => {
-                self.index = history.append_binary(
-                    self.index,
-                    T::one() / rhs.number.clone(),
-                    rhs.index,
-                    -self.number.clone() / (rhs.number.clone() * rhs.number),
-                );
-            }
-        }
     }
 }
 

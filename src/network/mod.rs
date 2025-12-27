@@ -14,8 +14,7 @@ use num_traits::{Float, Zero};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
-use std::iter::Sum;
-use std::ops::{AddAssign, Deref, DerefMut, Mul, Neg};
+use std::ops::{AddAssign, Deref, DerefMut, Neg};
 use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,10 +102,13 @@ impl<T> Parameters<Record<'_, T>> {
 }
 
 impl<T: 'static> Layer<T> {
-    fn write_to_tape<A>(self, tape: A::Tape) -> (OnceDifferentiableFunction<T>, Parameters<A>)
+    fn write_to_tape<'a, A>(
+        self,
+        tape: &'a A::Tape,
+    ) -> (OnceDifferentiableFunction<T>, Parameters<A>)
     where
         T: Zero + Clone,
-        A: AD<T>,
+        A: AD<'a, T>,
     {
         (
             self.activation,
@@ -275,16 +277,15 @@ where
         y_pred
     }
 
-    #[instrument(skip_all)]
     fn copy_to_tape<'a, A>(
         &self,
-        tape: A::Tape,
+        tape: &'a A::Tape,
     ) -> (
         TempStorage<OnceDifferentiableFunction<T>>,
         TempStorage<Parameters<A>>,
     )
     where
-        A: AD<T>,
+        A: AD<'a, T>,
         T: Clone + Zero,
     {
         self.inner
@@ -294,14 +295,15 @@ where
             .unzip()
     }
 
-    fn predict_with_recording<G, A>(
+    #[instrument(skip_all)]
+    fn predict_with_recording<'a, G, A>(
         &self,
         xs: ArrayView2<T>,
         fs: impl IntoIterator<Item = G>,
         ps: &[Parameters<A>],
     ) -> Array2<A>
     where
-        A: AD<T> + Exp,
+        A: AD<'a, T> + Exp + LinalgScalar,
         G: OnceDifferentiableFunctionOps<T>,
         T: Clone,
     {
@@ -317,14 +319,15 @@ where
         y_pred
     }
 
-    fn apply_gradients<A>(
+    #[instrument(skip_all)]
+    fn apply_gradients<'a, A>(
         &mut self,
         total_loss: A,
         learning_rate: T,
         gradients: impl IntoIterator<Item = Parameters<A>>,
     ) where
         T: AddAssign + Float,
-        A: AD<T> + Indexed,
+        A: AD<'a, T> + Indexed,
     {
         total_loss.with_derivatives(move |ds| {
             for (layer, p) in self.inner.layers.iter_mut().zip(gradients) {
@@ -338,21 +341,21 @@ where
         });
     }
 
-    pub fn learn<A, Tape>(
+    pub fn learn<'a, A, Tape>(
         &mut self,
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
         learning_rate: T,
         loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A,
-        tape: Tape,
+        tape: &'a Tape,
     ) -> T
     where
         T: Float + AddAssign,
-        A: AD<T, Tape = Tape> + Exp + Indexed,
-        Tape: ADTape<T, AD = A>,
+        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar,
+        Tape: ADTape<T, AD<'a> = A> + 'a,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
-        A::reset(tape);
+        tape.reset();
 
         let (fs, ps) = self.copy_to_tape(tape);
         let y_pred = self.predict_with_recording(batched_input.reversed_axes(), fs, &ps);
@@ -407,7 +410,7 @@ mod tests {
 
     fn sse<'a, A>(yp: ArrayView1<A>, yr: ArrayView1<f64>) -> A
     where
-        A: AD<f64>,
+        A: AD<'a, f64>,
     {
         Zip::from(&yp).and(&yr).fold(A::zero(), |acc, &yp, &yr| {
             acc + (yp - A::constant(yr)) * (yp - A::constant(yr))
@@ -432,7 +435,6 @@ mod tests {
 
         let tape = WengertList::leak();
         for _ in 0..900 {
-            tape.clear();
             network.learn(xs.view(), ys.view(), 1e-1, sse, tape);
             println!("{:.3}", network.predict(array![0.1, 0.2]));
         }

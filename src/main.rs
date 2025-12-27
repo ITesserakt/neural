@@ -115,7 +115,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
 fn cross_entropy<'a, T, A>(yp: ArrayView1<A>, yr: ArrayView1<T>) -> A
 where
     T: Copy + Float + DivAssign + One + 'static,
-    A: AD<T> + Neg<Output = A>,
+    A: AD<'a, T> + Neg<Output = A>,
 {
     let ln_fn = OnceDifferentiableFunction::from_static(
         &|x: T| (x + T::epsilon()).ln(),
