@@ -1,14 +1,12 @@
-use bump_scope::{BumpVec, Checkpoint};
 use num_traits::Zero;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
+use std::mem::MaybeUninit;
 
 /**
  * WengertLists are indexed with [`usize`].
  */
 type Index<T> = *const Operation<T>;
-type Allocator = bump_scope::Bump;
 
 /**
  * A list of operations performed in a forward pass of a dynamic computational graph,
@@ -41,11 +39,9 @@ type Allocator = bump_scope::Bump;
  * Record method call, and you can't call two methods simulatenously without threading.
  */
 pub struct WengertList<T> {
-    start: Checkpoint,
-    arena: &'static bump_scope::Bump,
-    operations: RefCell<BumpVec<Index<T>, Allocator>>,
-
-    derivatives_pool: object_pool::Pool<HashMap<usize, T>>,
+    operations: RefCell<Box<[MaybeUninit<Operation<T>>]>>,
+    last_operation: Cell<usize>,
+    derivatives_pool: object_pool::Pool<Vec<T>>,
 }
 
 /**
@@ -66,8 +62,7 @@ struct Operation<T> {
 }
 
 struct BorrowedWengertList<'a, T> {
-    arena: &'a bump_scope::Bump,
-    operations: &'a mut BumpVec<Index<T>, Allocator>,
+    slot: &'a mut MaybeUninit<Operation<T>>,
 }
 
 pub struct WengertListPool<T: 'static>(object_pool::Pool<&'static WengertList<T>>);
@@ -115,7 +110,7 @@ pub struct Record<'a, T> {
      * In normal use cases you should not need to read this field,
      * you can index [Derivatives] directly with Records.
      */
-    pub index: Index<T>,
+    index: Index<T>,
 }
 
 #[repr(C)]
@@ -136,11 +131,13 @@ pub(super) mod impls_pool {
 
     impl<T: 'static> WengertListPool<T> {
         pub fn new(capacity: usize) -> Self {
-            Self(object_pool::Pool::new(capacity, || WengertList::leak()))
+            Self(object_pool::Pool::new(capacity, || {
+                WengertList::leak(1 << 30)
+            }))
         }
 
         pub fn acquire(&self) -> Reusable<'_, &'static WengertList<T>> {
-            self.0.pull(|| WengertList::leak())
+            self.0.pull(|| WengertList::leak(1 << 30))
         }
     }
 
@@ -150,6 +147,11 @@ pub(super) mod impls_pool {
             while let Some(tape) = self.0.try_pull() {
                 let (_, tape) = Reusable::detach(tape);
                 debug!(?tape, "Dropping tape");
+                let operations = tape.operations.take();
+                operations
+                    .into_iter()
+                    .take(tape.last_operation.get())
+                    .for_each(|mut it| unsafe { it.assume_init_drop() });
             }
         }
     }
@@ -158,45 +160,37 @@ pub(super) mod impls_pool {
 pub(super) mod impls_list {
     use crate::differentiation::record::{BorrowedWengertList, Index};
     use crate::differentiation::{Record, WengertList};
-    use bump_scope::{BumpAllocator, BumpVec};
     use num_traits::Zero;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
+    use std::cell::{Cell, RefCell};
     use std::fmt::{Debug, Formatter};
 
     impl<T> Debug for WengertList<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("WengertList")
-                .field("stats", &self.arena.stats())
+                .field("stats", &self.operations.borrow().len())
                 .finish_non_exhaustive()
         }
     }
 
     impl<T> WengertList<T> {
+        pub fn new() -> Self {
+            Self::with_capacity(100_000)
+        }
+
         /**
          * Creates a new empty WengertList from which Records can be constructed.
          */
-        pub fn new() -> WengertList<T> {
-            let arena = Box::leak(Box::new(bump_scope::Bump::new()));
-            let operations = BumpVec::new_in(bump_scope::Bump::new());
-            let start = arena.checkpoint();
+        pub fn with_capacity(capacity: usize) -> WengertList<T> {
             WengertList {
-                arena,
-                start,
-                operations: RefCell::new(operations),
-                derivatives_pool: object_pool::Pool::new(1, || HashMap::new()),
+                operations: RefCell::new(Box::new_uninit_slice(capacity)),
+                last_operation: Cell::new(0),
+                derivatives_pool: object_pool::Pool::new(1, || Vec::new()),
             }
         }
 
-        pub fn leak() -> &'static WengertList<T> {
-            let list = Box::new(WengertList::new());
+        pub fn leak(capacity: usize) -> &'static WengertList<T> {
+            let list = Box::new(WengertList::with_capacity(capacity));
             Box::leak(list)
-        }
-    }
-
-    impl<T> Default for WengertList<T> {
-        fn default() -> Self {
-            Self::new()
         }
     }
 
@@ -207,10 +201,7 @@ pub(super) mod impls_list {
          * another computation and get new gradients.
          */
         pub fn clear(&self) {
-            unsafe {
-                self.operations.borrow_mut().clear();
-                self.arena.reset_to(self.start);
-            }
+            self.last_operation.set(0);
         }
     }
 
@@ -249,7 +240,7 @@ pub(super) mod impls_list {
          *
          * For example, if z = sin(x), then δz/δx = cos(x)
          */
-        pub fn append_unary(&self, parent: Index<T>, derivative: T) -> Index<T>
+        pub(super) fn append_unary(&self, parent: Index<T>, derivative: T) -> Index<T>
         where
             T: Zero,
         {
@@ -266,7 +257,7 @@ pub(super) mod impls_list {
          * For example, if z = y + x, then δz/δy = 1 and δz/δx = 1
          * For example, if z = y * x, then δz/δy = x and δz/δ/x = y
          */
-        pub fn append_binary(
+        pub(super) fn append_binary(
             &self,
             left_parent: Index<T>,
             left_derivative: T,
@@ -291,20 +282,19 @@ pub(super) mod impls_list {
         where
             F: FnOnce(&mut BorrowedWengertList<T>) -> R,
         {
-            op(&mut BorrowedWengertList::new(
-                &self.arena,
-                &mut *self.operations.borrow_mut(),
-            ))
+            let index = self.last_operation.get();
+            let slot = &mut self.operations.borrow_mut()[index];
+            self.last_operation.update(|x| x + 1);
+
+            op(&mut BorrowedWengertList::new(slot))
         }
     }
 }
 
 pub(super) mod impls_record {
-    use crate::differentiation::record::Operation;
     use crate::differentiation::record_operations::same_list;
     use crate::differentiation::{Derivatives, FrozenRecord, Indexed, Record, WengertList};
     use num_traits::{One, Zero};
-    use std::collections::HashMap;
     use std::fmt::{Debug, Formatter};
     use std::ops::AddAssign;
 
@@ -471,26 +461,32 @@ pub(super) mod impls_record {
         {
             let history = self.history?;
             let operations = history.operations.borrow();
+            let len = history.last_operation.get();
 
-            let mut adjoints = history.derivatives_pool.pull(|| HashMap::new());
+            let mut adjoints = history.derivatives_pool.pull(|| Vec::new());
             adjoints.clear();
+            adjoints.resize(len, T::zero());
 
             // δy/δy = 1
             adjoints.insert(self.index(), T::one());
 
-            for operation_ptr in operations.iter().rev() {
-                let operation = unsafe { operation_ptr.as_ref() }.unwrap();
-                let derivative = adjoints.get(&operation_ptr.addr()).map_or(T::zero(), T::clone);
+            let start = operations[0].as_ptr();
+            for i in (0..len).rev() {
+                let operation = unsafe { operations[i].assume_init_ref() };
+                let derivative = adjoints
+                    [unsafe { std::ptr::from_ref(operation).offset_from_unsigned(start) }]
+                .clone();
 
                 if !operation.left_parent.is_null() {
-                    let left_parent_index = operation.left_parent.addr();
-                    *adjoints.entry(left_parent_index).or_insert(T::zero()) +=
+                    let left_parent_index =
+                        unsafe { operation.left_parent.offset_from_unsigned(start) };
+                    adjoints[left_parent_index] +=
                         derivative.clone() * operation.left_derivative.clone();
                 }
                 if !operation.right_parent.is_null() {
-                    let right_parent_index = operation.right_parent.addr();
-                    *adjoints.entry(right_parent_index).or_insert(T::zero()) +=
-                        derivative * operation.right_derivative.clone();
+                    let right_parent_index =
+                        unsafe { operation.right_parent.offset_from_unsigned(start) };
+                    adjoints[right_parent_index] += derivative * operation.right_derivative.clone();
                 }
             }
 
@@ -501,7 +497,11 @@ pub(super) mod impls_record {
     impl<T> Indexed for Record<'_, T> {
         #[inline(always)]
         fn index(&self) -> usize {
-            self.index.addr()
+            if let Some(history) = self.history {
+                let start = history.operations.borrow()[0].as_ptr();
+                return unsafe { self.index.offset_from_unsigned(start) };
+            }
+            unreachable!()
         }
     }
 
@@ -652,11 +652,8 @@ pub(super) mod impls_record {
  * Methods for appending Operations after borrowing the Wengert list.
  */
 impl<'a, T> BorrowedWengertList<'a, T> {
-    fn new(
-        arena: &'a bump_scope::Bump,
-        operations: &'a mut BumpVec<Index<T>, Allocator>,
-    ) -> BorrowedWengertList<'a, T> {
-        BorrowedWengertList { arena, operations }
+    fn new(slot: &'a mut MaybeUninit<Operation<T>>) -> BorrowedWengertList<'a, T> {
+        BorrowedWengertList { slot }
     }
 
     /**
@@ -667,7 +664,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
     where
         T: Zero,
     {
-        let reference = self.arena.alloc(Operation {
+        self.slot.write(Operation {
             // this index of the child is used for both indexes as these
             // won't be needed but will always be valid (ie point to a
             // real entry on the list)
@@ -678,8 +675,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
             left_derivative: T::zero(),
             right_derivative: T::zero(),
         });
-        self.operations.push(&raw const *reference);
-        &raw const *reference
+        self.slot.as_ptr()
     }
 
     /**
@@ -695,7 +691,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
     where
         T: Zero,
     {
-        let reference = self.arena.alloc(Operation {
+        self.slot.write(Operation {
             left_parent: parent,
             // this index of the child is used as this index won't be needed
             // but will always be valid (ie points to a real entry on the list)
@@ -705,8 +701,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
             // as there is no right parent
             right_derivative: T::zero(),
         });
-        self.operations.push(&raw const *reference);
-        &raw const *reference
+        self.slot.as_ptr()
     }
 
     /**
@@ -727,13 +722,12 @@ impl<'a, T> BorrowedWengertList<'a, T> {
         right_parent: Index<T>,
         right_derivative: T,
     ) -> Index<T> {
-        let reference = self.arena.alloc(Operation {
+        self.slot.write(Operation {
             left_parent,
             right_parent,
             left_derivative,
             right_derivative,
         });
-        self.operations.push(&raw const *reference);
-        &raw const *reference
+        self.slot.as_ptr()
     }
 }

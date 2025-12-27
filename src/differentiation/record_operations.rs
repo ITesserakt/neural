@@ -3,7 +3,7 @@ use num_traits::real::Real;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
 use std::fmt::{Formatter, LowerExp};
-use std::ops::{Add, Div, DivAssign, Mul, Neg, Rem, Sub};
+use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
 /**
  * A record is displayed by showing its number component.

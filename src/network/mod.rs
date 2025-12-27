@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::fmt::Debug;
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
-use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -295,7 +294,7 @@ where
             .unzip()
     }
 
-    #[instrument(skip_all)]
+    // #[instrument(skip_all)]
     fn predict_with_recording<'a, G, A>(
         &self,
         xs: ArrayView2<T>,
@@ -319,7 +318,7 @@ where
         y_pred
     }
 
-    #[instrument(skip_all)]
+    // #[instrument(skip_all)]
     fn apply_gradients<'a, A>(
         &mut self,
         total_loss: A,
@@ -433,7 +432,7 @@ mod tests {
         ];
         let ys = array![[3.0], [1.2], [1.0], [2.5], [0.08]];
 
-        let tape = WengertList::leak();
+        let tape = WengertList::leak(100_000);
         for _ in 0..900 {
             network.learn(xs.view(), ys.view(), 1e-1, sse, tape);
             println!("{:.3}", network.predict(array![0.1, 0.2]));
@@ -480,7 +479,7 @@ mod tests {
             .map_collect(|yp, yr| sse(yp.mapv(Record::constant).view(), yr).number);
         aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
-        let tape = WengertList::leak();
+        let tape = WengertList::leak(100_000);
         let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse, tape);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
         aclose_array(

@@ -86,19 +86,18 @@ mod record_operations;
 mod trace;
 mod trace_operations;
 
-use std::collections::HashMap;
 use crate::differentiation::adr::GlobalComputationGraph;
 use crate::function_v2::OnceDifferentiableFunctionOps;
 pub use adr::Adr;
 use ndarray::LinalgScalar;
-use num_traits::{Float, Num, One, Zero};
+use num_traits::{Float, Num};
 use object_pool::Reusable;
 pub use record::{FrozenRecord, Record, WengertList, WengertListPool};
 use std::ops::{AddAssign, Index};
 pub use trace::Trace;
 
 pub struct Derivatives<'a, T> {
-    adjoints: Reusable<'a, HashMap<usize, T>>,
+    adjoints: Reusable<'a, Vec<T>>,
 }
 
 pub trait Indexed {
@@ -109,7 +108,7 @@ impl<I: Indexed, T> Index<&I> for Derivatives<'_, T> {
     type Output = T;
 
     fn index(&self, value: &I) -> &Self::Output {
-        &self.adjoints[&value.index()]
+        &self.adjoints[value.index()]
     }
 }
 
