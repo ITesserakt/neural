@@ -1,7 +1,7 @@
-use crate::activation::{linear_fn, sigmoid_fn};
+use crate::activation::{elu, linear_fn, relu_fn, sigmoid_fn, softplus};
 use crate::config::Config;
-use crate::differentiation::{Adr, Record, WengertListPool, AD};
-use crate::function_v2::{ArrayFunction, OnceDifferentiableFunction, Softmax};
+use crate::differentiation::{Record, WengertListPool, AD};
+use crate::function_v2::{ArrayFunction, He, OnceDifferentiableFunction, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
 use crate::network::Network;
@@ -9,19 +9,27 @@ use crate::utils::{Permutation, PermuteArray};
 use clap::Parser;
 use indicatif::style::TemplateError;
 use indicatif::ProgressStyle;
-use ndarray::{Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
 use ndarray_linalg::Scalar;
 use num_traits::{Float, One, Zero};
 use numpy::Element;
 use std::error::Error;
-use std::fmt::Write;
+use std::fmt::{Debug, Write};
+use std::fs::File;
+use std::io::{stdin, stdout, BufReader, BufWriter};
 use std::ops::{DivAssign, Neg};
-use tracing::{instrument, Level, Span};
+use tracing::level_filters::LevelFilter;
+use tracing::{error, info, info_span, instrument, trace, warn, Level, Span, Subscriber};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use tracing_indicatif::IndicatifLayer;
+use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::fmt::format;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 
 mod activation;
 mod config;
@@ -41,6 +49,13 @@ struct Env<'a, T: 'static, F> {
     tapes: WengertListPool<T>,
 }
 
+struct ConfusionMatrix {
+    tp: usize,
+    fp: usize,
+    tn: usize,
+    r#fn: usize,
+}
+
 impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
     pub fn new(network: Network<T, Ready<F>>, mnist: &'a Mnist<T>, config: Config) -> Self {
         Self {
@@ -56,16 +71,17 @@ impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
 }
 
 impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
-    fn compute_loss(&self, xs: ArrayView2<f32>, ys: ArrayView2<f32>) -> f32
+    fn compute_loss(&self, xs: ArrayView2<f32>, ys: ArrayView2<f32>) -> (f32, Array2<f32>)
     where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
         let y_pred = self.network.predict_many(xs).reversed_axes();
-        Zip::from(y_pred.rows())
+        let loss = Zip::from(y_pred.rows())
             .and(ys.rows())
             .fold(f32::zero(), |acc, yp, yr| {
                 acc + cross_entropy(yp.mapv(Record::constant).view(), yr).number
-            })
+            });
+        (loss, y_pred)
     }
 
     #[instrument(skip_all)]
@@ -80,11 +96,12 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
             .zip(ys.axis_chunks_iter(Axis(0), self.config.batch_size))
         {
             let tape = self.tapes.acquire();
-            let loss = self
-                .network
-                .learn(xs, ys, self.config.learning_rate, cross_entropy, *tape);
+            let (loss, _) =
+                self.network
+                    .learn(xs, ys, self.config.learning_rate, cross_entropy, *tape);
 
             message.clear();
+            trace!(target: "output", "{loss}");
             write!(&mut message, "Loss = {loss:.3}").unwrap();
             Span::current().pb_set_message(&message);
             Span::current().pb_inc(1);
@@ -104,31 +121,82 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
 
             self.batch_iterations(xs.view(), ys.view());
 
-            let loss = self.compute_loss(self.test_xs.view(), self.test_ys.view());
+            let (loss, y_pred) = self.compute_loss(self.test_xs.view(), self.test_ys.view());
+            for item in y_pred {
+                trace!(target: "predictions", "{item}");
+            }
 
             Span::current().pb_set_message(&format!("Loss = {loss:.3}"));
             Span::current().pb_inc(1);
         }
     }
+
+    fn answer_prompt(&self) -> std::io::Result<bool> {
+        let mut prompt = String::new();
+        print!("> ");
+        std::io::Write::flush(&mut stdout())?;
+        if stdin().read_line(&mut prompt)? == 0 {
+            return Ok(false);
+        }
+
+        match prompt.trim() {
+            x if x.starts_with("test all") => {
+                let y_pred = self.network.predict_many(self.test_xs);
+                let loss = Zip::from(y_pred.columns())
+                    .and(self.test_ys.rows())
+                    .map_collect(|yp, yr| {
+                        cross_entropy(yp.mapv(Record::constant).view(), yr).number
+                    });
+
+                info!("Mean loss  = {}", loss.mean().unwrap());
+                info!("Loss std   = {}", loss.std(1.0));
+                info!("Total loss = {}", loss.sum());
+            }
+            x if x.starts_with("test") => {
+                let index_str = x.strip_prefix("test").unwrap().trim();
+                let Ok(index) = index_str.parse::<usize>() else {
+                    warn!("Cannot parse: {index_str}");
+                    return Ok(true);
+                };
+
+                let y_real = self.test_ys.slice(s![index, ..]);
+                let x = self.test_xs.slice(s![index, ..]);
+                let y_pred = self.network.predict(x);
+                let loss = cross_entropy(y_pred.mapv(Record::constant).view(), y_real).number;
+
+                info!("Expected target probabilities:  {y_real:.2}");
+                info!("Predicted target probabilities: {y_pred:.2}");
+                info!("Loss: {}", loss)
+            }
+            "save" => {
+                info!("Saving network parameters");
+                let mut file = BufWriter::new(File::create(&self.config.parameters_path)?);
+                if let Err(e) = self.network.save_parameters_to(&mut file) {
+                    error!("Cannot serialize parameters: {e}")
+                }
+            }
+            "quit" => return Ok(false),
+            _ => {}
+        };
+
+        Ok(true)
+    }
 }
 
 fn cross_entropy<'a, T, A>(yp: ArrayView1<A>, yr: ArrayView1<T>) -> A
 where
-    T: Copy + Float + DivAssign + One + 'static,
+    T: Float + DivAssign + 'static,
     A: AD<'a, T> + Neg<Output = A>,
 {
-    let ln_fn = OnceDifferentiableFunction::from_static(
-        &|x: T| (x + T::epsilon()).ln(),
-        &|x: T| T::one() / (x + T::epsilon()),
-        &|x| (x + Adr::epsilon()).ln(),
-    );
+    let ln_fn =
+        OnceDifferentiableFunction::from_static(&|x: T| x.ln(), &|x: T| T::one() / x, &|x| x.ln());
 
     -Zip::from(&yp).and(&yr).fold(A::zero(), |acc, yp, &yr| {
         acc + A::constant(yr) * yp.apply_function(&ln_fn)
     })
 }
 
-fn init_tracing() -> Result<(), TemplateError> {
+fn init_tracing() -> Result<(), Box<dyn Error>> {
     let indicatif_layer = IndicatifLayer::new().with_progress_style(
         ProgressStyle::with_template(
             "{span_child_prefix} {span_name} [{elapsed_precise}] [{bar:.cyan/blue}] {{{msg}}} ({pos}/{len} | {eta})",
@@ -136,14 +204,35 @@ fn init_tracing() -> Result<(), TemplateError> {
         .progress_chars("#>-"),
     );
 
+    let output = File::create("output.csv")?;
+    let predictions = File::create("predictions.csv")?;
+    let ys_test = File::create("ys_test.csv")?;
+
+    fn create_file_output_layer<S: Subscriber>(file: File, name: &'static str) -> impl Layer<S>
+    where
+        for<'span> S: LookupSpan<'span>,
+    {
+        tracing_subscriber::fmt::layer()
+            .with_writer(file)
+            .event_format(format().compact())
+            .with_level(false)
+            .with_target(false)
+            .with_ansi(true)
+            .without_time()
+            .with_filter(LevelFilter::TRACE)
+            .with_filter(filter_fn(move |m| m.target() == name))
+    }
+
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(indicatif_layer.get_stderr_writer()))
-        .with(indicatif_layer)
         .with(
-            EnvFilter::builder()
-                .with_default_directive(Level::DEBUG.into())
-                .from_env_lossy(),
+            tracing_subscriber::fmt::layer()
+                .with_writer(indicatif_layer.get_stderr_writer())
+                .with_filter(LevelFilter::DEBUG),
         )
+        .with(indicatif_layer)
+        .with(create_file_output_layer(predictions, "predictions"))
+        .with(create_file_output_layer(output, "output"))
+        .with(create_file_output_layer(ys_test, "ys_test"))
         .init();
 
     Ok(())
@@ -154,13 +243,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::parse();
     let mnist = config.load_mnist_dataset()?;
 
-    let network = Network::new(28 * 28)
+    {
+        for item in mnist.test().targets() {
+            trace!(target: "ys_test", "{item}");
+        }
+    }
+
+    let mut network = Network::new(28 * 28)
         .push_hidden_layer(32, sigmoid_fn())
         .push_output_layer(10, linear_fn())
         .map_output(Softmax);
 
+    if config.load_parameters_from_cache {
+        let mut file = BufReader::new(File::open(&config.parameters_path)?);
+        network.load_parameters_from(&mut file)?;
+    }
+
     let mut env = Env::new(network, &mnist, config.clone());
-    env.epoch_iterations();
+    {
+        let _output_collector = info_span!("output").entered();
+        trace!(target: "output", "loss");
+        let _predictions_collector = info_span!("predictions").entered();
+        if !config.load_parameters_from_cache {
+            env.epoch_iterations();
+        }
+    }
+
+    while env.answer_prompt()? {}
 
     Ok(())
 }

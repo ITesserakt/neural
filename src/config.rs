@@ -18,6 +18,10 @@ pub struct Config {
     dataset_path: PathBuf,
     #[arg(long, default_value = ".cache")]
     cache_path: PathBuf,
+    #[arg(long, default_value = "params.dat")]
+    pub parameters_path: PathBuf,
+    #[arg(short = 'p', long, default_value_t = false)]
+    pub load_parameters_from_cache: bool,
     #[arg(short, long, default_value_t = 20)]
     pub epoches: usize,
     #[arg(short, long, default_value_t = 256)]

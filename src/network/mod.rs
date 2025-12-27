@@ -13,8 +13,9 @@ use ndarray_rand::RandomExt;
 use num_traits::{Float, Zero};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::fmt::Debug;
+use std::fmt::{Debug, Display};
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
+use serde::de::DeserializeOwned;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -131,6 +132,29 @@ impl<T> Network<T, Hidden<StdRng>> {
                 rng: StdRng::from_os_rng(),
             },
         }
+    }
+}
+
+impl<T, S> Network<T, S> {
+    pub fn save_parameters_to(&self, writer: &mut impl std::io::Write) -> Result<(), postcard::Error>
+    where
+        T: Serialize
+    {
+        let ps = self.inner.layers.iter().map(|it| &it.parameters).collect::<Vec<_>>();
+        postcard::to_io(&ps, writer)?;
+        Ok(())
+    }
+    
+    pub fn load_parameters_from(&mut self, reader: &mut impl std::io::Read) -> Result<(), postcard::Error>
+    where 
+        T: DeserializeOwned
+    {
+        let mut buffer = [0; 1024 * 1024];
+        let (ps, _) = postcard::from_io::<Vec<Parameters<T>>, _>((reader, &mut buffer))?;
+        for (layer, p) in self.inner.layers.iter_mut().zip(ps) {
+            layer.parameters = p;
+        }
+        Ok(())
     }
 }
 
@@ -347,10 +371,10 @@ where
         learning_rate: T,
         loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A,
         tape: &'a Tape,
-    ) -> T
+    ) -> (T, Array2<T>)
     where
         T: Float + AddAssign,
-        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar,
+        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar + Display,
         Tape: ADTape<T, AD<'a> = A> + 'a,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
@@ -365,7 +389,7 @@ where
 
         let factor = T::one() / T::from(batched_target.nrows()).unwrap();
         self.apply_gradients(total_loss, -learning_rate * factor, ps);
-        total_loss.unwrap()
+        (total_loss.unwrap(), y_pred.mapv(A::unwrap))
     }
 }
 
@@ -480,7 +504,7 @@ mod tests {
         aclose_array(loss_before.view(), array![1.0, 0.5800256583859735], 1e-15);
 
         let tape = WengertList::leak(100_000);
-        let loss_right_in = network.learn(xs.view(), ys.view(), 0.1, sse, tape);
+        let (loss_right_in, _) = network.learn(xs.view(), ys.view(), 0.1, sse, tape);
         aclose(loss_right_in, loss_before.sum(), 1e-15);
         aclose_array(
             network.inner.layers[0].weights.view(),

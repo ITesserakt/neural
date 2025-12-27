@@ -546,7 +546,7 @@ pub(super) mod impls_record {
             T: Zero + Clone,
         {
             match self.history {
-                None => Record::constant(self.number),
+                None => Record::constant(fx(self.number)),
                 Some(history) => Record {
                     number: fx(self.number.clone()),
                     history: Some(history),
