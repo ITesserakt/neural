@@ -302,19 +302,20 @@ where
         ps: &[Parameters<A>],
     ) -> Array2<A>
     where
-        A: AD<'a, T> + Exp + LinalgScalar,
-        G: OnceDifferentiableFunctionOps<T>,
-        T: Clone,
+        A: AD<'a, T> + Exp + LinalgScalar + Send + Sync,
+        G: OnceDifferentiableFunctionOps<T> + Send + Sync,
+        T: Clone + Send + Sync,
+        F: Sync
     {
         let mut current = xs.mapv(A::constant);
         for (f, p) in fs.into_iter().zip(ps) {
             let mut a = p.weights.dot(&current);
-            Zip::from(a.columns_mut()).for_each(|mut col| col.scaled_add(A::one(), &p.biases));
-            let z = a.mapv_into(|x| x.apply_function(&f));
-            current = z;
+            Zip::from(a.columns_mut()).par_for_each(|mut col| col.scaled_add(A::one(), &p.biases));
+            a.par_mapv_inplace(|x| x.apply_function(&f));
+            current = a;
         }
         let mut y_pred = current;
-        Zip::from(y_pred.columns_mut()).for_each(|col| self.state.output.call(col));
+        Zip::from(y_pred.columns_mut()).par_for_each(|col| self.state.output.call(col));
         y_pred
     }
 
@@ -325,17 +326,17 @@ where
         learning_rate: T,
         gradients: impl IntoIterator<Item = Parameters<A>>,
     ) where
-        T: AddAssign + Float,
-        A: AD<'a, T> + Indexed,
+        T: AddAssign + Float + Send + Sync,
+        A: AD<'a, T> + Indexed + Send + Sync
     {
         total_loss.with_derivatives(move |ds| {
             for (layer, p) in self.inner.layers.iter_mut().zip(gradients) {
-                layer
-                    .weights
-                    .zip_mut_with(&p.weights, |x, y| *x += learning_rate * ds[y]);
-                layer
-                    .biases
-                    .zip_mut_with(&p.biases, |x, y| *x += learning_rate * ds[y]);
+                Zip::from(&mut layer.weights)
+                    .and(&p.weights)
+                    .par_for_each(|x, y| *x += learning_rate * ds[y]);
+                Zip::from(&mut layer.biases)
+                    .and(&p.biases)
+                    .par_for_each(|x, y| *x += learning_rate * ds[y]);
             }
         });
     }
@@ -345,13 +346,14 @@ where
         batched_input: ArrayView2<T>,
         batched_target: ArrayView2<T>,
         learning_rate: T,
-        loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A,
+        loss: impl Fn(ArrayView1<A>, ArrayView1<T>) -> A + Send + Sync,
         tape: &'a Tape,
     ) -> T
     where
-        T: Float + AddAssign,
-        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar,
+        T: Float + AddAssign + Send + Sync,
+        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar + Send + Sync,
         Tape: ADTape<T, AD<'a> = A> + 'a,
+        F: Sync,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
         tape.reset();
@@ -361,7 +363,7 @@ where
 
         let total_loss = Zip::from(y_pred.columns())
             .and(batched_target.rows())
-            .fold(A::zero(), |acc, yp, yr| acc + loss(yp, yr));
+            .par_fold(A::zero, |acc, yp, yr| acc + loss(yp, yr), A::add);
 
         let factor = T::one() / T::from(batched_target.nrows()).unwrap();
         self.apply_gradients(total_loss, -learning_rate * factor, ps);
