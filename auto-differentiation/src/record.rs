@@ -44,6 +44,7 @@ struct Slot<T>(UnsafeCell<MaybeUninit<Operation<T>>>);
 pub struct WengertList<T: Copy> {
     operations: Box<[Slot<T>]>,
     last_operation: Cell<usize>,
+    derivatives_pool: object_pool::Pool<Vec<T>>
 }
 
 /**
@@ -150,6 +151,7 @@ pub(super) mod impls_list {
                     std::mem::transmute(Box::<[Operation<T>]>::new_uninit_slice(capacity))
                 },
                 last_operation: Cell::new(0),
+                derivatives_pool: object_pool::Pool::new(1, Vec::new)
             }
         }
 
@@ -261,6 +263,7 @@ pub(super) mod impls_record {
     use std::fmt::{Debug, Formatter};
     use std::ops::AddAssign;
     use num_traits::{One, Zero};
+    use object_pool::Reusable;
     use crate::{Derivatives, Indexed};
     use crate::record::{FrozenRecord, Record, WengertList};
     use crate::record_operations::same_list;
@@ -402,7 +405,7 @@ pub(super) mod impls_record {
          * constant.
          */
         #[track_caller]
-        pub fn derivatives(&self) -> Derivatives<T>
+        pub fn derivatives(&self) -> Derivatives<Reusable<'_, Vec<T>>>
         where
             T: Clone + Zero + One + AddAssign,
         {
@@ -422,7 +425,7 @@ pub(super) mod impls_record {
          * If you have N inputs x<sub>1</sub> to x<sub>N</sub>, and this output is y,
          * then this computes all the derivatives δy/δx<sub>i</sub> for i = 1 to N.
          */
-        pub fn try_derivatives(&self) -> Option<Derivatives<T>>
+        pub fn try_derivatives(&self) -> Option<Derivatives<Reusable<'_, Vec<T>>>>
         where
             T: Clone + Zero + One + AddAssign,
         {
@@ -430,7 +433,9 @@ pub(super) mod impls_record {
             let operations = &history.operations;
             let len = history.last_operation.get();
 
-            let mut adjoints = vec![T::zero(); len];
+            let mut adjoints = history.derivatives_pool.pull(Vec::new);
+            adjoints.clear();
+            adjoints.resize(len, T::zero());
 
             // δy/δy = 1
             adjoints[self.index()] = T::one();

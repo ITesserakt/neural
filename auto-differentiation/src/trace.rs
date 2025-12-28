@@ -1,6 +1,6 @@
 use std::ops::{Add, Mul};
 use ndarray::{Array1, ArrayBase, ArrayView1, Data, Ix1};
-use num_traits::{ConstOne, ConstZero, One};
+use num_traits::{One, Zero};
 
 /**
  * A dual number which traces a real number and keeps track of its derivative.
@@ -69,13 +69,13 @@ impl<T> Trace<T> {
      * δC/δx = 0, as with symbolic differentiation.
      */
     #[inline(always)]
-    pub const fn constant(c: T) -> Trace<T>
+    pub fn constant(c: T) -> Trace<T>
     where
-        T: ConstZero,
+        T: Zero,
     {
         Trace {
             number: c,
-            derivative: T::ZERO,
+            derivative: T::zero()
         }
     }
 
@@ -87,13 +87,13 @@ impl<T> Trace<T> {
      * differentiation.
      */
     #[inline(always)]
-    pub const fn variable(x: T) -> Trace<T>
+    pub fn variable(x: T) -> Trace<T>
     where
-        T: ConstOne,
+        T: One,
     {
         Trace {
             number: x,
-            derivative: T::ONE,
+            derivative: T::one(),
         }
     }
 
@@ -109,7 +109,7 @@ impl<T> Trace<T> {
     #[inline]
     pub fn derivative(function: impl FnOnce(Trace<T>) -> Trace<T>, x: T) -> T
     where
-        T: ConstOne,
+        T: One,
     {
         function(Trace::variable(x)).derivative
     }
@@ -120,7 +120,7 @@ impl<T> Trace<T> {
         xs: ArrayBase<impl Data<Elem = T>, Ix1>,
     ) -> (T, Array1<T>)
     where
-        T: ConstZero + Clone + One + PartialEq,
+        T: Zero + Clone + One + PartialEq,
     {
         let mut traces = xs.mapv(Trace::constant);
         let mut result = xs.to_owned();

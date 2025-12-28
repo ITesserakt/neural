@@ -35,7 +35,7 @@
 
 use ndarray::ScalarOperand;
 use num_traits::real::Real;
-use num_traits::{ConstOne, ConstZero, Num, NumCast, One, ToPrimitive, Zero};
+use num_traits::{ConstZero, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 use crate::trace::Trace;
@@ -80,7 +80,7 @@ where
 
 impl<T> Zero for Trace<T>
 where
-    T: ConstZero,
+    T: Zero,
 {
     #[inline(always)]
     fn zero() -> Self {
@@ -91,10 +91,6 @@ where
     fn is_zero(&self) -> bool {
         self.number.is_zero()
     }
-}
-
-impl<T: ConstZero> ConstZero for Trace<T> {
-    const ZERO: Self = Trace::constant(T::ZERO);
 }
 
 impl<T> Mul<Self> for Trace<T>
@@ -114,16 +110,12 @@ where
 
 impl<T> One for Trace<T>
 where
-    T: ConstOne + ConstZero + Clone,
+    T: One + Zero + Clone,
 {
     #[inline(always)]
     fn one() -> Self {
         Trace::constant(T::one())
     }
-}
-
-impl<T: ConstZero + ConstOne + Clone> ConstOne for Trace<T> {
-    const ONE: Self = Trace::constant(T::ONE);
 }
 
 impl<T: PartialEq> PartialEq for Trace<T> {
@@ -182,7 +174,7 @@ impl<T: Real> Rem<Self> for Trace<T> {
     }
 }
 
-impl<T: Real + ConstZero + ConstOne> Num for Trace<T> {
+impl<T: Real + Zero + One> Num for Trace<T> {
     type FromStrRadixErr = T::FromStrRadixErr;
 
     #[inline(always)]

@@ -73,13 +73,16 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     }
 
     #[instrument(skip_all)]
-    fn batch_iterations(&mut self, xs: ArrayView2<f32>, ys: ArrayView2<f32>)
-    where
+    fn batch_iterations(
+        &mut self,
+        xs: ArrayView2<f32>,
+        ys: ArrayView2<f32>,
+        tape: &'static WengertList<f32>,
+    ) where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
         let mut message = String::new();
         Span::current().pb_set_length(xs.nrows() as u64 / self.config.batch_size as u64);
-        let tape = WengertList::leak(1 << 25);
 
         for (xs, ys) in xs
             .axis_chunks_iter(Axis(0), self.config.batch_size)
@@ -98,7 +101,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     }
 
     #[instrument(skip_all)]
-    fn epoch_iterations(&mut self)
+    fn epoch_iterations(&mut self, tape: &'static WengertList<f32>)
     where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
@@ -108,7 +111,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
             let xs = self.train_xs.permute_axis(Axis(0), &permutation);
             let ys = self.train_ys.view().permute_axis(Axis(0), &permutation);
 
-            self.batch_iterations(xs.view(), ys.view());
+            self.batch_iterations(xs.view(), ys.view(), tape);
 
             let (loss, y_pred) = self.compute_loss(self.test_xs.view(), self.test_ys.view());
             for item in y_pred {
@@ -251,7 +254,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         trace!(target: "output", "loss");
         let _predictions_collector = info_span!("predictions").entered();
         if !config.load_parameters_from_cache {
-            env.epoch_iterations();
+            let tape = WengertList::leak(1 << 25);
+            env.epoch_iterations(tape);
         }
     }
 

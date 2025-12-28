@@ -80,24 +80,38 @@
  * - [Yes you should understand backprop](https://medium.com/@karpathy/yes-you-should-understand-backprop-e2f06eab496b)
  */
 
-use std::ops::{AddAssign, Index};
-use num_traits::{Float, Num, Zero};
+use std::marker::PhantomData;
+use std::ops::{AddAssign, Deref, Index, Mul};
+use num_traits::{Float, Num, One, Zero};
+use object_pool::Reusable;
 use crate::record::{FrozenRecord, Record, WengertList};
+use crate::trace::Trace;
 
 pub mod record;
 mod record_operations;
 pub mod trace;
 mod trace_operations;
 
-pub struct Derivatives<T> {
-    adjoints: Vec<T>,
+pub struct Derivatives<C> {
+    adjoints: C,
 }
 
 pub trait Indexed {
     fn index(&self) -> usize;
 }
 
-impl<I: Indexed, T> Index<&I> for Derivatives<T> {
+pub struct NoTape<A>(PhantomData<A>);
+
+impl<A> NoTape<A> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<I: Indexed, C, T> Index<&I> for Derivatives<C>
+where
+    C: Deref<Target: Index<usize, Output = T>>
+{
     type Output = T;
 
     fn index(&self, value: &I) -> &Self::Output {
@@ -107,12 +121,13 @@ impl<I: Indexed, T> Index<&I> for Derivatives<T> {
 
 pub trait AD<'a, T>: Num + Copy {
     type Tape: ADTape<T>;
+    type Derivatives<'b>;
 
     fn constant(value: T) -> Self;
     fn variable(value: T, tape: &'a Self::Tape) -> Self;
 
     fn apply_function(self, function: impl Fn(T) -> T, derivative: impl Fn(T) -> T) -> Self;
-    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R;
+    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<Self::Derivatives<'_>>) -> R) -> R;
     fn unwrap(self) -> T;
 }
 
@@ -127,6 +142,7 @@ where
     T: Float + 'static + AddAssign,
 {
     type Tape = WengertList<T>;
+    type Derivatives<'b> = Reusable<'b, Vec<T>>;
 
     fn constant(value: T) -> Self {
         Record::constant(value)
@@ -140,10 +156,42 @@ where
         self.unary(function, derivative)
     }
 
-    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
+    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<Reusable<Vec<T>>>) -> R) -> R {
         f(self.derivatives())
     }
 
+    fn unwrap(self) -> T {
+        self.number
+    }
+}
+
+impl<'a, T> AD<'a, T> for Trace<T>
+where
+    T: One + Float + Zero
+{
+    type Tape = NoTape<Self>;
+    type Derivatives<'b> = T;
+
+    #[inline]
+    fn constant(value: T) -> Self {
+        Self::variable(value)
+    }
+
+    #[inline]
+    fn variable(value: T, _: &'a Self::Tape) -> Self {
+        Self::variable(value)
+    }
+
+    #[inline]
+    fn apply_function(self, function: impl Fn(T) -> T, derivative: impl Fn(T) -> T) -> Self {
+        self.unary(function, derivative)
+    }
+
+    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
+        f(Derivatives { adjoints: self.derivative })
+    }
+
+    #[inline]
     fn unwrap(self) -> T {
         self.number
     }
@@ -160,6 +208,12 @@ where
     }
 }
 
+impl<T, A> ADTape<T> for NoTape<A> {
+    type AD<'a> = A;
+
+    fn reset(&self) {}
+}
+
 pub trait Exp {
     fn exp(self) -> Self;
 }
@@ -172,6 +226,16 @@ impl<T: Float> Exp for T {
 }
 
 impl<T: Exp + Copy + Zero> Exp for Record<'_, T> {
+    #[inline]
+    fn exp(self) -> Self {
+        self.unary(T::exp, T::exp)
+    }
+}
+
+impl<T> Exp for Trace<T>
+where
+    T: Exp + Mul<Output = T> + Clone
+{
     #[inline]
     fn exp(self) -> Self {
         self.unary(T::exp, T::exp)

@@ -5,18 +5,18 @@ use crate::function_v2::{
     WeightsInitialization,
 };
 use crate::network::config::{Hidden, IntoLayerConfig, Ready};
+use auto_differentiation::record::{FrozenRecord, Record};
+use auto_differentiation::{ADTape, Exp, Indexed, AD};
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, CowArray, Ix1, Ix2, LinalgScalar, Zip};
 use ndarray_rand::rand::rngs::StdRng;
 use ndarray_rand::rand::{Rng, SeedableRng};
 use ndarray_rand::RandomExt;
 use num_traits::{Float, Zero};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::fmt::{Debug, Display};
-use std::ops::{AddAssign, Deref, DerefMut, Neg};
-use serde::de::DeserializeOwned;
-use auto_differentiation::{ADTape, Exp, Indexed, AD};
-use auto_differentiation::record::{FrozenRecord, Record};
+use std::fmt::Debug;
+use std::ops::{AddAssign, Deref, DerefMut, Index, Neg};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -137,18 +137,29 @@ impl<T> Network<T, Hidden<StdRng>> {
 }
 
 impl<T, S> Network<T, S> {
-    pub fn save_parameters_to(&self, writer: &mut impl std::io::Write) -> Result<(), postcard::Error>
+    pub fn save_parameters_to(
+        &self,
+        writer: &mut impl std::io::Write,
+    ) -> Result<(), postcard::Error>
     where
-        T: Serialize
+        T: Serialize,
     {
-        let ps = self.inner.layers.iter().map(|it| &it.parameters).collect::<Vec<_>>();
+        let ps = self
+            .inner
+            .layers
+            .iter()
+            .map(|it| &it.parameters)
+            .collect::<Vec<_>>();
         postcard::to_io(&ps, writer)?;
         Ok(())
     }
-    
-    pub fn load_parameters_from(&mut self, reader: &mut impl std::io::Read) -> Result<(), postcard::Error>
-    where 
-        T: DeserializeOwned
+
+    pub fn load_parameters_from(
+        &mut self,
+        reader: &mut impl std::io::Read,
+    ) -> Result<(), postcard::Error>
+    where
+        T: DeserializeOwned,
     {
         let mut buffer = [0; 1024 * 1024];
         let (ps, _) = postcard::from_io::<Vec<Parameters<T>>, _>((reader, &mut buffer))?;
@@ -352,6 +363,7 @@ where
     ) where
         T: AddAssign + Float,
         A: AD<'a, T> + Indexed,
+        for<'b> A::Derivatives<'b>: Deref<Target: Index<usize, Output = T>>,
     {
         total_loss.with_derivatives(move |ds| {
             for (layer, p) in self.inner.layers.iter_mut().zip(gradients) {
@@ -375,7 +387,8 @@ where
     ) -> (T, Array2<T>)
     where
         T: Float + AddAssign,
-        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar + Display,
+        A: AD<'a, T, Tape = Tape> + Exp + Indexed + LinalgScalar,
+        for<'b> A::Derivatives<'b>: Deref<Target: Index<usize, Output = T>>,
         Tape: ADTape<T, AD<'a> = A> + 'a,
     {
         debug_assert_eq!(batched_input.nrows(), batched_target.nrows());
@@ -399,12 +412,12 @@ mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
     use crate::function_v2::Linear;
     use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
+    use auto_differentiation::record::{Record, WengertList};
+    use auto_differentiation::AD;
     use ndarray::{array, Array1, Array2, ArrayBase, ArrayView1, Data, Dimension, Zip};
     use ndarray_linalg::{aclose, Scalar};
     use ndarray_rand::rand::prelude::StdRng;
     use smallvec::smallvec;
-    use auto_differentiation::AD;
-    use auto_differentiation::record::{WengertList, Record};
 
     fn aclose_array<T: Scalar, D: Dimension>(
         actual: ArrayBase<impl Data<Elem = T>, D>,
