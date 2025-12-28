@@ -188,7 +188,7 @@ where
     }
 }
 
-impl<T> ADTape<T> for WengertList<T>
+impl<T: Copy> ADTape<T> for WengertList<T>
 where
     T: 'static
 {

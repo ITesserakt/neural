@@ -1,5 +1,5 @@
 use num_traits::Zero;
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, UnsafeCell};
 use std::fmt::Debug;
 use std::mem::MaybeUninit;
 
@@ -7,6 +7,9 @@ use std::mem::MaybeUninit;
  * WengertLists are indexed with [`usize`].
  */
 type Index<T> = *const Operation<T>;
+
+#[repr(transparent)]
+struct Slot<T>(UnsafeCell<MaybeUninit<Operation<T>>>);
 
 /**
  * A list of operations performed in a forward pass of a dynamic computational graph,
@@ -38,8 +41,8 @@ type Index<T> = *const Operation<T>;
  * in safe Rust because each mutable borrow of the WengertList is dropped at the end of each
  * Record method call, and you can't call two methods simulatenously without threading.
  */
-pub struct WengertList<T> {
-    operations: RefCell<Box<[MaybeUninit<Operation<T>>]>>,
+pub struct WengertList<T: Copy> {
+    operations: Box<[Slot<T>]>,
     last_operation: Cell<usize>,
     derivatives_pool: object_pool::Pool<Vec<T>>,
 }
@@ -53,7 +56,7 @@ pub struct WengertList<T> {
  * each node was computed from. The main difference is that the numerical
  * index of those parents in the WengertList is stored, rather than any pointers.
  */
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct Operation<T> {
     left_parent: Index<T>,
     right_parent: Index<T>,
@@ -65,7 +68,7 @@ struct BorrowedWengertList<'a, T> {
     slot: &'a mut MaybeUninit<Operation<T>>,
 }
 
-pub struct WengertListPool<T: 'static>(object_pool::Pool<&'static WengertList<T>>);
+pub struct WengertListPool<T: 'static + Copy>(object_pool::Pool<&'static WengertList<T>>);
 
 /**
  * A wrapper around a real number which records it going through the computational
@@ -93,7 +96,7 @@ pub struct WengertListPool<T: 'static>(object_pool::Pool<&'static WengertList<T>
  * in providing understanding on how to implement Reverse Mode Automatic Differentiation.
  */
 #[repr(C)]
-pub struct Record<'a, T> {
+pub struct Record<'a, T: Copy> {
     // A record consists of a number used in the forward pass, as
     // well as a WengertList of operations performed on the numbers
     // and each record needs to know which point in the history they
@@ -127,9 +130,9 @@ pub(super) mod impls_pool {
     use object_pool::Reusable;
     use tracing::debug;
 
-    unsafe impl<T: Send + Sync> Sync for WengertListPool<T> {}
+    unsafe impl<T: Send + Sync + Copy> Sync for WengertListPool<T> {}
 
-    impl<T: 'static> WengertListPool<T> {
+    impl<T: 'static + Copy> WengertListPool<T> {
         pub fn new(capacity: usize) -> Self {
             Self(object_pool::Pool::new(capacity, || {
                 WengertList::leak(1 << 30)
@@ -141,38 +144,37 @@ pub(super) mod impls_pool {
         }
     }
 
-    impl<T: 'static> Drop for WengertListPool<T> {
+    impl<T: 'static + Copy> Drop for WengertListPool<T> {
         fn drop(&mut self) {
             debug!("Total allocated tapes: {}", self.0.len());
             while let Some(tape) = self.0.try_pull() {
                 let (_, tape) = Reusable::detach(tape);
                 debug!(?tape, "Dropping tape");
-                let operations = tape.operations.take();
-                operations
-                    .into_iter()
-                    .take(tape.last_operation.get())
-                    .for_each(|mut it| unsafe { it.assume_init_drop() });
+                while let Some(vec) = tape.derivatives_pool.try_pull() {
+                    vec.detach();
+                }
+                tape.clear();
             }
         }
     }
 }
 
 pub(super) mod impls_list {
-    use crate::differentiation::record::{BorrowedWengertList, Index};
+    use crate::differentiation::record::{BorrowedWengertList, Index, Operation};
     use crate::differentiation::{Record, WengertList};
     use num_traits::Zero;
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
     use std::fmt::{Debug, Formatter};
 
-    impl<T> Debug for WengertList<T> {
+    impl<T: Copy> Debug for WengertList<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("WengertList")
-                .field("stats", &self.operations.borrow().len())
+                .field("capacity", &self.operations.len())
                 .finish_non_exhaustive()
         }
     }
 
-    impl<T> WengertList<T> {
+    impl<T: Copy> WengertList<T> {
         pub fn new() -> Self {
             Self::with_capacity(100_000)
         }
@@ -182,7 +184,9 @@ pub(super) mod impls_list {
          */
         pub fn with_capacity(capacity: usize) -> WengertList<T> {
             WengertList {
-                operations: RefCell::new(Box::new_uninit_slice(capacity)),
+                operations: unsafe {
+                    std::mem::transmute(Box::<[Operation<T>]>::new_uninit_slice(capacity))
+                },
                 last_operation: Cell::new(0),
                 derivatives_pool: object_pool::Pool::new(1, || Vec::new()),
             }
@@ -194,7 +198,7 @@ pub(super) mod impls_list {
         }
     }
 
-    impl<T> WengertList<T> {
+    impl<T: Copy> WengertList<T> {
         /**
          * Clears a WengertList to make it empty again. After clearing a WengertList
          * you must reset all the Records still using that list. Then you can perform
@@ -205,7 +209,7 @@ pub(super) mod impls_list {
         }
     }
 
-    impl<T> WengertList<T> {
+    impl<T: Copy> WengertList<T> {
         /**
          * Creates a record backed by this WengertList.
          *
@@ -278,15 +282,16 @@ pub(super) mod impls_list {
          * holding the first would trigger a panic, as would holding onto the borrow after the public
          * API method is finished
          */
+        #[inline(always)]
         fn borrow<F, R>(&self, op: F) -> R
         where
             F: FnOnce(&mut BorrowedWengertList<T>) -> R,
         {
             let index = self.last_operation.get();
-            let slot = &mut self.operations.borrow_mut()[index];
+            let slot = &self.operations[index];
             self.last_operation.update(|x| x + 1);
 
-            op(&mut BorrowedWengertList::new(slot))
+            slot.with_mut(|it| op(&mut BorrowedWengertList::new(it)))
         }
     }
 }
@@ -298,7 +303,7 @@ pub(super) mod impls_record {
     use std::fmt::{Debug, Formatter};
     use std::ops::AddAssign;
 
-    impl<T: Debug> Debug for Record<'_, T> {
+    impl<T: Debug + Copy> Debug for Record<'_, T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             self.number.fmt(f)
         }
@@ -327,7 +332,7 @@ pub(super) mod impls_record {
      * Constants can be used to save memory if you have numbers that
      * you do not need to compute the gradients with respect to.
      */
-    impl<'a, T> Record<'a, T> {
+    impl<'a, T: Copy> Record<'a, T> {
         /**
          * Creates an untracked Record which has no backing WengertList.
          *
@@ -420,7 +425,7 @@ pub(super) mod impls_record {
         }
     }
 
-    impl<'a, T> Record<'a, T> {
+    impl<'a, T: Copy> Record<'a, T> {
         /**
          * Performs a backward pass up this record's WengertList from this
          * record as the output, computing all the derivatives for the inputs
@@ -460,7 +465,7 @@ pub(super) mod impls_record {
             T: Clone + Zero + One + AddAssign,
         {
             let history = self.history?;
-            let operations = history.operations.borrow();
+            let operations = &history.operations;
             let len = history.last_operation.get();
 
             let mut adjoints = history.derivatives_pool.pull(|| Vec::new());
@@ -468,37 +473,38 @@ pub(super) mod impls_record {
             adjoints.resize(len, T::zero());
 
             // δy/δy = 1
-            adjoints.insert(self.index(), T::one());
+            adjoints[self.index()] = T::one();
 
             let start = operations[0].as_ptr();
             for i in (0..len).rev() {
-                let operation = unsafe { operations[i].assume_init_ref() };
-                let derivative = adjoints
-                    [unsafe { std::ptr::from_ref(operation).offset_from_unsigned(start) }]
-                .clone();
-
-                if !operation.left_parent.is_null() {
-                    let left_parent_index =
-                        unsafe { operation.left_parent.offset_from_unsigned(start) };
-                    adjoints[left_parent_index] +=
-                        derivative.clone() * operation.left_derivative.clone();
-                }
-                if !operation.right_parent.is_null() {
-                    let right_parent_index =
-                        unsafe { operation.right_parent.offset_from_unsigned(start) };
-                    adjoints[right_parent_index] += derivative * operation.right_derivative.clone();
-                }
+                operations[i].with_mut(|it| {
+                    let operation = unsafe { it.assume_init_ref() };
+                    let derivative =
+                        adjoints[unsafe { it.as_ptr().offset_from_unsigned(start) }].clone();
+                    if !operation.left_parent.is_null() {
+                        let left_parent_index =
+                            unsafe { operation.left_parent.offset_from_unsigned(start) };
+                        adjoints[left_parent_index] +=
+                            derivative.clone() * operation.left_derivative.clone();
+                    }
+                    if !operation.right_parent.is_null() {
+                        let right_parent_index =
+                            unsafe { operation.right_parent.offset_from_unsigned(start) };
+                        adjoints[right_parent_index] +=
+                            derivative * operation.right_derivative.clone();
+                    }
+                });
             }
 
             Some(Derivatives { adjoints })
         }
     }
 
-    impl<T> Indexed for Record<'_, T> {
+    impl<T: Copy> Indexed for Record<'_, T> {
         #[inline(always)]
         fn index(&self) -> usize {
             if let Some(history) = self.history {
-                let start = history.operations.borrow()[0].as_ptr();
+                let start = history.operations[0].as_ptr();
                 return unsafe { self.index.offset_from_unsigned(start) };
             }
             unreachable!()
@@ -512,13 +518,13 @@ pub(super) mod impls_record {
         }
     }
 
-    impl<T> From<T> for Record<'_, T> {
+    impl<T: Copy> From<T> for Record<'_, T> {
         fn from(value: T) -> Self {
             Self::constant(value)
         }
     }
 
-    impl<'a, T> Record<'a, T> {
+    impl<'a, T: Copy> Record<'a, T> {
         /**
          * Creates a new Record from a reference to an existing Record by applying
          * some unary function to it which operates on the type the Record wraps.
@@ -637,7 +643,7 @@ pub(super) mod impls_record {
         }
     }
 
-    impl<T: Clone> Clone for Record<'_, T> {
+    impl<T: Copy> Clone for Record<'_, T> {
         fn clone(&self) -> Self {
             Self {
                 number: self.number.clone(),
@@ -651,7 +657,7 @@ pub(super) mod impls_record {
 /**
  * Methods for appending Operations after borrowing the Wengert list.
  */
-impl<'a, T> BorrowedWengertList<'a, T> {
+impl<'a, T: Copy> BorrowedWengertList<'a, T> {
     fn new(slot: &'a mut MaybeUninit<Operation<T>>) -> BorrowedWengertList<'a, T> {
         BorrowedWengertList { slot }
     }
@@ -691,7 +697,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
     where
         T: Zero,
     {
-        self.slot.write(Operation {
+        std::ptr::from_ref(self.slot.write(Operation {
             left_parent: parent,
             // this index of the child is used as this index won't be needed
             // but will always be valid (ie points to a real entry on the list)
@@ -700,8 +706,7 @@ impl<'a, T> BorrowedWengertList<'a, T> {
             // for the right parent 0 is used to zero out this calculation
             // as there is no right parent
             right_derivative: T::zero(),
-        });
-        self.slot.as_ptr()
+        }))
     }
 
     /**
@@ -722,12 +727,24 @@ impl<'a, T> BorrowedWengertList<'a, T> {
         right_parent: Index<T>,
         right_derivative: T,
     ) -> Index<T> {
-        self.slot.write(Operation {
+        std::ptr::from_ref(self.slot.write(Operation {
             left_parent,
             right_parent,
             left_derivative,
             right_derivative,
-        });
-        self.slot.as_ptr()
+        }))
+    }
+}
+
+impl<T: Copy> Slot<T> {
+    #[inline(always)]
+    fn with_mut<R>(&self, f: impl FnOnce(&mut MaybeUninit<Operation<T>>) -> R) -> R {
+        let ptr = self.0.get();
+        f(unsafe { ptr.as_mut().unwrap_unchecked() })
+    }
+
+    #[inline(always)]
+    fn as_ptr(&self) -> Index<T> {
+        self.0.get() as *const _ as Index<T>
     }
 }

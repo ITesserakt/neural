@@ -45,7 +45,7 @@ impl<T: Float> Exp for T {
     }
 }
 
-impl<T: Exp + Clone + Zero> Exp for Record<'_, T> {
+impl<T: Exp + Copy + Zero> Exp for Record<'_, T> {
     #[inline]
     fn exp(self) -> Self {
         self.unary(T::exp, T::exp)

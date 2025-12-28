@@ -90,7 +90,7 @@ impl<T> Parameters<T> {
     }
 }
 
-impl<T> Parameters<Record<'_, T>> {
+impl<T: Copy> Parameters<Record<'_, T>> {
     #[allow(dead_code)]
     #[inline(always)]
     fn freeze(self) -> Parameters<FrozenRecord<T>> {

@@ -1,34 +1,31 @@
-use crate::activation::{elu, linear_fn, relu_fn, sigmoid_fn, softplus};
+use crate::activation::{linear_fn, sigmoid_fn};
 use crate::config::Config;
 use crate::differentiation::{Record, WengertListPool, AD};
-use crate::function_v2::{ArrayFunction, He, OnceDifferentiableFunction, Softmax};
+use crate::function_v2::{ArrayFunction, OnceDifferentiableFunction, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
 use clap::Parser;
-use indicatif::style::TemplateError;
 use indicatif::ProgressStyle;
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
+use ndarray::{s, Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
 use ndarray_linalg::Scalar;
-use num_traits::{Float, One, Zero};
+use num_traits::{Float, Zero};
 use numpy::Element;
 use std::error::Error;
-use std::fmt::{Debug, Write};
+use std::fmt::Write;
 use std::fs::File;
 use std::io::{stdin, stdout, BufReader, BufWriter};
 use std::ops::{DivAssign, Neg};
 use tracing::level_filters::LevelFilter;
-use tracing::{error, info, info_span, instrument, trace, warn, Level, Span, Subscriber};
+use tracing::{error, info, info_span, instrument, trace, warn, Span, Subscriber};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::format;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 mod activation;
@@ -39,7 +36,7 @@ mod mnist;
 mod network;
 mod utils;
 
-struct Env<'a, T: 'static, F> {
+struct Env<'a, T: 'static + Copy, F> {
     network: Network<T, Ready<F>>,
     train_xs: ArrayView2<'a, T>,
     train_ys: Array2<T>,
@@ -47,13 +44,6 @@ struct Env<'a, T: 'static, F> {
     test_ys: Array2<T>,
     config: Config,
     tapes: WengertListPool<T>,
-}
-
-struct ConfusionMatrix {
-    tp: usize,
-    fp: usize,
-    tn: usize,
-    r#fn: usize,
 }
 
 impl<'a, T: Element + Scalar, F> Env<'a, T, F> {

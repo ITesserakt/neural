@@ -8,13 +8,13 @@ use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 /**
  * A record is displayed by showing its number component.
  */
-impl<'a, T: std::fmt::Display> std::fmt::Display for Record<'a, T> {
+impl<'a, T: std::fmt::Display + Copy> std::fmt::Display for Record<'a, T> {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "{}", self.number)
     }
 }
 
-impl<'a, T: LowerExp> LowerExp for Record<'a, T> {
+impl<'a, T: LowerExp + Copy> LowerExp for Record<'a, T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         self.number.fmt(f)
     }
@@ -32,7 +32,7 @@ impl<T: Copy> Copy for Record<'_, T> {}
  * If both records have a WengertList, then checks that the lists are
  * the same.
  */
-pub(crate) fn same_list<T>(a: &Record<T>, b: &Record<T>) -> bool {
+pub(crate) fn same_list<T: Copy>(a: &Record<T>, b: &Record<T>) -> bool {
     match (a.history, b.history) {
         (None, None) => true,
         (Some(_), None) => true,
@@ -42,11 +42,11 @@ pub(crate) fn same_list<T>(a: &Record<T>, b: &Record<T>) -> bool {
 }
 
 /// Compares two WengertList references directly.
-pub(crate) fn same_lists<T>(list_a: &WengertList<T>, list_b: &WengertList<T>) -> bool {
+pub(crate) fn same_lists<T: Copy>(list_a: &WengertList<T>, list_b: &WengertList<T>) -> bool {
     std::ptr::eq(list_a, list_b)
 }
 
-impl<N: FromPrimitive> FromPrimitive for Record<'_, N> {
+impl<N: FromPrimitive + Copy> FromPrimitive for Record<'_, N> {
     fn from_i64(n: i64) -> Option<Self> {
         Some(Record::constant(N::from_i64(n)?))
     }
@@ -56,19 +56,19 @@ impl<N: FromPrimitive> FromPrimitive for Record<'_, N> {
     }
 }
 
-impl<T: PartialEq> PartialEq for Record<'_, T> {
+impl<T: PartialEq + Copy> PartialEq for Record<'_, T> {
     fn eq(&self, other: &Self) -> bool {
         self.number == other.number
     }
 }
 
-impl<T: PartialOrd> PartialOrd for Record<'_, T> {
+impl<T: PartialOrd + Copy> PartialOrd for Record<'_, T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.number.partial_cmp(&other.number)
     }
 }
 
-impl<T: ToPrimitive> ToPrimitive for Record<'_, T> {
+impl<T: ToPrimitive + Copy> ToPrimitive for Record<'_, T> {
     fn to_i64(&self) -> Option<i64> {
         Some(self.number.to_i64()?)
     }
@@ -78,13 +78,13 @@ impl<T: ToPrimitive> ToPrimitive for Record<'_, T> {
     }
 }
 
-impl<N: NumCast> NumCast for Record<'_, N> {
+impl<N: NumCast + Copy> NumCast for Record<'_, N> {
     fn from<T: ToPrimitive>(n: T) -> Option<Self> {
         Some(Record::constant(N::from(n)?))
     }
 }
 
-impl<T> Add<Self> for Record<'_, T>
+impl<T: Copy> Add<Self> for Record<'_, T>
 where
     T: Add<Output = T> + Zero + One + Clone,
 {
@@ -96,7 +96,7 @@ where
     }
 }
 
-impl<T> Zero for Record<'_, T>
+impl<T: Copy> Zero for Record<'_, T>
 where
     T: Zero + One + Clone,
 {
@@ -109,7 +109,7 @@ where
     }
 }
 
-impl<T> One for Record<'_, T>
+impl<T: Copy> One for Record<'_, T>
 where
     T: One + Zero + Clone,
 {
@@ -118,7 +118,7 @@ where
     }
 }
 
-impl<T> Mul<Self> for Record<'_, T>
+impl<T: Copy> Mul<Self> for Record<'_, T>
 where
     T: Mul<Output = T> + Zero + One + Clone,
 {
@@ -130,7 +130,7 @@ where
     }
 }
 
-impl<T> Sub<Self> for Record<'_, T>
+impl<T: Copy> Sub<Self> for Record<'_, T>
 where
     T: Sub<Output = T> + Zero + Clone + One + Neg<Output = T>,
 {
@@ -142,7 +142,7 @@ where
     }
 }
 
-impl<T> Div<Self> for Record<'_, T>
+impl<T: Copy> Div<Self> for Record<'_, T>
 where
     T: Div<Output = T> + Zero + Clone + One + Neg<Output = T>,
 {
@@ -159,7 +159,7 @@ where
     }
 }
 
-impl<T> Rem<Self> for Record<'_, T>
+impl<T: Copy> Rem<Self> for Record<'_, T>
 where
     T: Rem<Output = T> + Zero + Clone + One + Real,
 {
@@ -171,7 +171,7 @@ where
     }
 }
 
-impl<T> Num for Record<'_, T>
+impl<T: Copy> Num for Record<'_, T>
 where
     T: PartialEq + Zero + Clone + Real + One + Num,
 {
@@ -182,7 +182,7 @@ where
     }
 }
 
-impl<T> Neg for Record<'_, T>
+impl<T: Copy> Neg for Record<'_, T>
 where
     T: Neg<Output = T> + Zero + Clone + One,
 {
