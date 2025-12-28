@@ -1,4 +1,4 @@
-use crate::activation::{gaussian_fn, leaky_relu, linear_fn, relu_fn, silu, softmax};
+use crate::activation::{gaussian_fn, leaky_relu, linear_fn, relu_fn, sigmoid_fn, silu, softmax};
 use crate::config::Config;
 use crate::function_v2::{ArrayFunction, He, Softmax};
 use crate::mnist::Mnist;
@@ -263,7 +263,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut network = Network::new(28 * 28)
-        .push_hidden_layer(32, (leaky_relu(), He))
+        .push_hidden_layer(32, sigmoid_fn())
         .push_output_layer(10, linear_fn())
         .map_output(Softmax);
 
