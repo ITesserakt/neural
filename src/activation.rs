@@ -2,15 +2,13 @@
 
 use crate::function_v2::OnceDifferentiableFunction;
 use num_traits::{Float, One, Zero};
+use auto_differentiation::Exp;
 
 pub fn sigmoid_fn<T: Float>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(
-        &|x: T| T::one() / (T::one() + T::exp(-x)),
-        &|x| {
-            let z = T::one() / (T::one() + T::exp(-x));
-            z * (T::one() - z)
-        },
-    )
+    OnceDifferentiableFunction::from_static(&|x: T| T::one() / (T::one() + T::exp(-x)), &|x| {
+        let z = T::one() / (T::one() + T::exp(-x));
+        z * (T::one() - z)
+    })
 }
 
 pub fn linear_fn<T: One>() -> OnceDifferentiableFunction<T> {
@@ -29,13 +27,10 @@ pub fn relu_fn<T: PartialOrd + Zero + One + Clone>() -> OnceDifferentiableFuncti
 }
 
 pub fn softplus<T: Float>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(
-        &|x: T| x.exp().ln_1p(),
-        &|x| {
-            let exp = x.exp();
-            exp / (T::one() + exp)
-        },
-    )
+    OnceDifferentiableFunction::from_static(&|x: T| x.exp().ln_1p(), &|x| {
+        let exp = x.exp();
+        exp / (T::one() + exp)
+    })
 }
 
 pub fn elu<T: Float + Send + Sync>(alpha: T) -> OnceDifferentiableFunction<T> {
@@ -50,6 +45,33 @@ pub fn elu<T: Float + Send + Sync>(alpha: T) -> OnceDifferentiableFunction<T> {
                 alpha * x.exp()
             }
         },
+    )
+}
+
+pub fn gaussian_fn<T: Float>() -> OnceDifferentiableFunction<T> {
+    OnceDifferentiableFunction::from_static(&|x: T| (-x * x).exp(), &|x| {
+        -T::from(2).unwrap() * x * (-x * x).exp()
+    })
+}
+
+pub fn softmax<T: Float>() -> OnceDifferentiableFunction<T> {
+    OnceDifferentiableFunction::from_static(
+        &|x: T| x / (T::one() + x.abs()),
+        &|x| T::one() / (T::one() + x.abs()).powi(2)
+    )
+}
+
+pub fn silu<T: Float>() -> OnceDifferentiableFunction<T> {
+    OnceDifferentiableFunction::from_static(
+        &|x: T| x / (T::one() + (-x).exp()),
+        &|x| (T::one() + (-x).exp() + x*(-x).exp()) / (T::one() + (-x).exp()).powi(2)
+    )
+}
+
+pub fn leaky_relu() -> OnceDifferentiableFunction<f32> {
+    OnceDifferentiableFunction::from_static(
+        &move |x: f32| 1e-2 * x,
+        &move |x| if x < 0.0 { 1e-2 } else { 1.0 }
     )
 }
 

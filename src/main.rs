@@ -1,23 +1,24 @@
-use crate::activation::{linear_fn, sigmoid_fn};
+use crate::activation::{gaussian_fn, leaky_relu, linear_fn, relu_fn, silu, softmax};
 use crate::config::Config;
-use crate::function_v2::{ArrayFunction, Softmax};
+use crate::function_v2::{ArrayFunction, He, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
 use auto_differentiation::record::{Record, WengertList};
-use auto_differentiation::AD;
+use auto_differentiation::{Exp, AD};
 use clap::Parser;
 use indicatif::ProgressStyle;
 use ndarray::{s, Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
-use ndarray_linalg::Scalar;
-use num_traits::{Float, Zero};
+use num_traits::{Float, FromPrimitive, One, ToPrimitive, Zero};
 use numpy::Element;
 use std::error::Error;
-use std::fmt::Write;
+use std::fmt::{Display, Write};
 use std::fs::File;
 use std::io::{stdin, stdout, BufReader, BufWriter};
-use std::ops::{DivAssign, Neg};
+use std::ops::{AddAssign, DivAssign, Neg};
+use std::str::FromStr;
+use serde::Serialize;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, info, info_span, instrument, trace, warn, Span, Subscriber};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
@@ -36,17 +37,25 @@ mod mnist;
 mod network;
 mod utils;
 
-struct Env<'a, T: 'static + Copy, F> {
+struct Env<'a, T, F>
+where
+    T: FromStr<Err: Into<Box<dyn Error + Send + Sync + 'static>>>,
+    T: Copy + 'static + Send + Sync,
+{
     network: Network<T, Ready<F>>,
     train_xs: ArrayView2<'a, T>,
     train_ys: Array2<T>,
     test_xs: ArrayView2<'a, T>,
     test_ys: Array2<T>,
-    config: Config,
+    config: Config<T>,
 }
 
-impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
-    pub fn new(network: Network<T, Ready<F>>, mnist: &'a Mnist<T>, config: Config) -> Self {
+impl<'a, T, F> Env<'a, T, F>
+where
+    T: FromStr<Err: Into<Box<dyn Error + Send + Sync + 'static>>>,
+    T: Element + Copy + Send + Sync + 'static + ToPrimitive + One + Zero,
+{
+    pub fn new(network: Network<T, Ready<F>>, mnist: &'a Mnist<T>, config: Config<T>) -> Self {
         Self {
             network,
             train_xs: Mnist::features_flattened(mnist.train().features()),
@@ -58,15 +67,30 @@ impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
     }
 }
 
-impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
-    fn compute_loss(&self, xs: ArrayView2<f32>, ys: ArrayView2<f32>) -> (f32, Array2<f32>)
+impl<F: ArrayFunction<Ix1> + Send + Sync, T> Env<'_, T, F>
+where
+    T: FromStr<Err: Into<Box<dyn Error + Send + Sync + 'static>>>,
+    T: Element
+        + Exp
+        + Float
+        + Copy
+        + Send
+        + Sync
+        + 'static
+        + AddAssign
+        + DivAssign
+        + Display
+        + FromPrimitive
+        + Serialize,
+{
+    fn compute_loss(&self, xs: ArrayView2<T>, ys: ArrayView2<T>) -> (T, Array2<T>)
     where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
         let y_pred = self.network.predict_many(xs).reversed_axes();
         let loss = Zip::from(y_pred.rows())
             .and(ys.rows())
-            .fold(f32::zero(), |acc, yp, yr| {
+            .fold(T::zero(), |acc, yp, yr| {
                 acc + cross_entropy(yp.mapv(Record::constant).view(), yr).number
             });
         (loss, y_pred)
@@ -75,9 +99,9 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     #[instrument(skip_all)]
     fn batch_iterations(
         &mut self,
-        xs: ArrayView2<f32>,
-        ys: ArrayView2<f32>,
-        tape: &'static WengertList<f32>,
+        xs: ArrayView2<T>,
+        ys: ArrayView2<T>,
+        tape: &'static WengertList<T>,
     ) where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
@@ -101,7 +125,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     }
 
     #[instrument(skip_all)]
-    fn epoch_iterations(&mut self, tape: &'static WengertList<f32>)
+    fn epoch_iterations(&mut self, tape: &'static WengertList<T>)
     where
         F: ArrayFunction<Ix1> + Send + Sync,
     {
@@ -141,7 +165,7 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
                     });
 
                 info!("Mean loss  = {}", loss.mean().unwrap());
-                info!("Loss std   = {}", loss.std(1.0));
+                info!("Loss std   = {}", loss.std(T::zero()));
                 info!("Total loss = {}", loss.sum());
             }
             x if x.starts_with("test") => {
@@ -229,7 +253,7 @@ fn init_tracing() -> Result<(), Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     init_tracing()?;
-    let config = Config::parse();
+    let config = Config::<f32>::parse();
     let mnist = config.load_mnist_dataset()?;
 
     {
@@ -239,7 +263,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut network = Network::new(28 * 28)
-        .push_hidden_layer(32, sigmoid_fn())
+        .push_hidden_layer(32, (leaky_relu(), He))
         .push_output_layer(10, linear_fn())
         .map_output(Softmax);
 
@@ -254,7 +278,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         trace!(target: "output", "loss");
         let _predictions_collector = info_span!("predictions").entered();
         if !config.load_parameters_from_cache {
-            let tape = WengertList::leak(1 << 25);
+            let tape = WengertList::leak(1 << 28);
             env.epoch_iterations(tape);
         }
     }

@@ -10,10 +10,15 @@ use std::fmt::{Display, Formatter};
 use std::fs::{create_dir_all, File};
 use std::io::{BufReader, BufWriter, ErrorKind};
 use std::path::PathBuf;
+use std::str::FromStr;
 use tracing::debug;
 
 #[derive(Debug, Parser, Clone)]
-pub struct Config {
+pub struct Config<T>
+where
+    T: Clone + Send + Sync + 'static,
+    T: FromStr<Err: Into<Box<dyn std::error::Error + Send + Sync + 'static>>>,
+{
     #[arg(long, required = true)]
     dataset_path: PathBuf,
     #[arg(long, default_value = ".cache")]
@@ -26,8 +31,8 @@ pub struct Config {
     pub epoches: usize,
     #[arg(short, long, default_value_t = 256)]
     pub batch_size: usize,
-    #[arg(short, long, default_value_t = 1e-1)]
-    pub learning_rate: f32,
+    #[arg(short, long, default_value = "1e-1")]
+    pub learning_rate: T,
 }
 
 type SerializationError = postcard::Error;
@@ -39,7 +44,11 @@ pub enum Error {
     Serialize(SerializationError),
 }
 
-impl Config {
+impl<N> Config<N>
+where
+    N: Clone + Send + Sync + 'static,
+    N: FromStr<Err: Into<Box<dyn std::error::Error + Send + Sync + 'static>>>,
+{
     fn get_cached_dataset_path(&self) -> std::io::Result<PathBuf> {
         match create_dir_all(&self.cache_path) {
             Ok(_) => {}

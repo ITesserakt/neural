@@ -6,9 +6,8 @@ pkgs.mkShell {
     rustup
 
     pkg-config
-    llvmPackages.bintools
 
-    # blas
+    blas
     # openblas
     # openssl
     # gfortran
@@ -20,5 +19,5 @@ pkgs.mkShell {
     ])
   ];
 
-  # RUSTFLAGS = "-lblas";
+  RUSTFLAGS = "-lblas";
 }

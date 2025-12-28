@@ -60,7 +60,7 @@ where
         let two = T::from_usize(2).unwrap();
         let output = T::from_usize(output).unwrap();
         let input = T::from_usize(input).unwrap();
-        Normal::new(T::zero(), (two / (output + input)).sqrt()).unwrap()
+        Normal::new(T::zero(), two / (output + input)).unwrap()
     }
 }
 
@@ -72,8 +72,8 @@ where
     fn distribution(&self, _: usize, input: usize) -> impl Distribution<T> {
         let two = T::from_usize(2).unwrap();
         let input = T::from_usize(input).unwrap();
-        let factor = (two / input).sqrt();
-        Normal::new(-factor, factor).unwrap()
+        let factor = two / input;
+        Normal::new(T::zero(), factor).unwrap()
     }
 }
 

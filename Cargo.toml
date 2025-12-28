@@ -10,7 +10,6 @@ edition = "2024"
 
 [dependencies]
 auto-differentiation = { path = "auto-differentiation", version = "0.1" }
-
 ndarray = { version = "0.17", features = ["serde", "matrixmultiply-threading"] }
 ndarray-linalg = { version = "0.18", features = ["intel-mkl-static"] }
 ndarray-rand = "0.16"
