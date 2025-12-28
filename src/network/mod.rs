@@ -1,8 +1,7 @@
 pub mod config;
 
-use crate::differentiation::{ADTape, FrozenRecord, Indexed, Record, AD};
 use crate::function_v2::{
-    ArrayFunction, Exp, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
+    ArrayFunction, Linear, OnceDifferentiableFunction, OnceDifferentiableFunctionOps,
     WeightsInitialization,
 };
 use crate::network::config::{Hidden, IntoLayerConfig, Ready};
@@ -16,6 +15,8 @@ use smallvec::SmallVec;
 use std::fmt::{Debug, Display};
 use std::ops::{AddAssign, Deref, DerefMut, Neg};
 use serde::de::DeserializeOwned;
+use auto_differentiation::{ADTape, Exp, Indexed, AD};
+use auto_differentiation::record::{FrozenRecord, Record};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Parameters<T> {
@@ -334,7 +335,7 @@ where
         for (f, p) in fs.into_iter().zip(ps) {
             let mut a = p.weights.dot(&current);
             Zip::from(a.columns_mut()).for_each(|mut col| col.scaled_add(A::one(), &p.biases));
-            let z = a.mapv_into(|x| x.apply_function(&f));
+            let z = a.mapv_into(|x| x.apply_function(|x| f.function(x), |x| f.derivative(x)));
             current = z;
         }
         let mut y_pred = current;
@@ -396,13 +397,14 @@ where
 #[cfg(test)]
 mod tests {
     use crate::activation::{linear_fn, relu_fn, sigmoid_fn};
-    use crate::differentiation::{Record, WengertList, AD};
     use crate::function_v2::Linear;
     use crate::network::{Hidden, Layer, Network, NetworkData, Parameters, Ready};
     use ndarray::{array, Array1, Array2, ArrayBase, ArrayView1, Data, Dimension, Zip};
     use ndarray_linalg::{aclose, Scalar};
     use ndarray_rand::rand::prelude::StdRng;
     use smallvec::smallvec;
+    use auto_differentiation::AD;
+    use auto_differentiation::record::{WengertList, Record};
 
     fn aclose_array<T: Scalar, D: Dimension>(
         actual: ArrayBase<impl Data<Elem = T>, D>,

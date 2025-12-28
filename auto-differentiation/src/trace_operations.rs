@@ -33,12 +33,12 @@
 * you have to import the trait as well as have a type that implements it!
 */
 
-use crate::differentiation::Trace;
 use ndarray::ScalarOperand;
 use num_traits::real::Real;
 use num_traits::{ConstOne, ConstZero, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
+use crate::trace::Trace;
 
 /**
  * A trace is displayed by showing its number component.
@@ -224,11 +224,11 @@ impl<T: Neg<Output = T>> Neg for Trace<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::differentiation::Trace;
     use ndarray::array;
     use ndarray_linalg::aclose;
     use num_traits::real::Real;
     use std::ops::Mul;
+    use crate::trace::Trace;
 
     fn f<T: Real>(x: T, y: T) -> T {
         x.sin() * y.cos()

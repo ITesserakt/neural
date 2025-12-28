@@ -80,31 +80,24 @@
  * - [Yes you should understand backprop](https://medium.com/@karpathy/yes-you-should-understand-backprop-e2f06eab496b)
  */
 
-mod adr;
-mod record;
+use std::ops::{AddAssign, Index};
+use num_traits::{Float, Num, Zero};
+use crate::record::{FrozenRecord, Record, WengertList};
+
+pub mod record;
 mod record_operations;
-mod trace;
+pub mod trace;
 mod trace_operations;
 
-use crate::differentiation::adr::GlobalComputationGraph;
-use crate::function_v2::OnceDifferentiableFunctionOps;
-pub use adr::Adr;
-use ndarray::LinalgScalar;
-use num_traits::{Float, Num};
-use object_pool::Reusable;
-pub use record::{FrozenRecord, Record, WengertList, WengertListPool};
-use std::ops::{AddAssign, Index};
-pub use trace::Trace;
-
-pub struct Derivatives<'a, T> {
-    adjoints: Reusable<'a, Vec<T>>,
+pub struct Derivatives<T> {
+    adjoints: Vec<T>,
 }
 
 pub trait Indexed {
     fn index(&self) -> usize;
 }
 
-impl<I: Indexed, T> Index<&I> for Derivatives<'_, T> {
+impl<I: Indexed, T> Index<&I> for Derivatives<T> {
     type Output = T;
 
     fn index(&self, value: &I) -> &Self::Output {
@@ -118,7 +111,7 @@ pub trait AD<'a, T>: Num + Copy {
     fn constant(value: T) -> Self;
     fn variable(value: T, tape: &'a Self::Tape) -> Self;
 
-    fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self;
+    fn apply_function(self, function: impl Fn(T) -> T, derivative: impl Fn(T) -> T) -> Self;
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R;
     fn unwrap(self) -> T;
 }
@@ -143,44 +136,12 @@ where
         Record::variable(value, tape)
     }
 
-    #[inline]
-    fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self {
-        self.unary(|x| f.function(x), |x| f.derivative(x))
+    fn apply_function(self, function: impl Fn(T) -> T, derivative: impl Fn(T) -> T) -> Self {
+        self.unary(function, derivative)
     }
 
     fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
         f(self.derivatives())
-    }
-
-    fn unwrap(self) -> T {
-        self.number
-    }
-}
-
-impl<'a, T> AD<'a, T> for Adr<T>
-where
-    Self: Num + LinalgScalar,
-    T: Float + AddAssign,
-{
-    type Tape = ();
-
-    fn constant(value: T) -> Self {
-        Adr::constant(value)
-    }
-
-    fn variable(value: T, _: &()) -> Self {
-        Adr::variable(value)
-    }
-
-    #[inline]
-    fn apply_function(self, f: &impl OnceDifferentiableFunctionOps<T>) -> Self {
-        f.ad_function(self)
-    }
-
-    fn with_derivatives<R>(&self, f: impl FnOnce(Derivatives<T>) -> R) -> R {
-        let graph = GlobalComputationGraph::<T>::get();
-        let ds = graph.get_backwards_mode_grad(self.node_idx);
-        f(ds)
     }
 
     fn unwrap(self) -> T {
@@ -199,17 +160,23 @@ where
     }
 }
 
-impl<T> ADTape<T> for ()
-where
-    T: 'static + Float + AddAssign
-{
-    type AD<'a> = Adr<T>;
+pub trait Exp {
+    fn exp(self) -> Self;
+}
 
-    fn reset(&self) {
-        GlobalComputationGraph::<T>::get().reset();
+impl<T: Float> Exp for T {
+    #[inline]
+    fn exp(self) -> Self {
+        <T as Float>::exp(self)
     }
 }
 
+impl<T: Exp + Copy + Zero> Exp for Record<'_, T> {
+    #[inline]
+    fn exp(self) -> Self {
+        self.unary(T::exp, T::exp)
+    }
+}
 
 #[cfg(test)]
 #[should_panic]
@@ -222,14 +189,14 @@ fn test_record_derivatives_when_no_history() {
 #[test]
 fn test_sync() {
     fn assert_sync<T: Sync>() {}
-    assert_sync::<Trace<f64>>();
+    assert_sync::<trace::Trace<f64>>();
     assert_sync::<FrozenRecord<f64>>();
 }
 
 #[test]
 fn test_send() {
     fn assert_send<T: Send>() {}
-    assert_send::<Trace<f64>>();
+    assert_send::<trace::Trace<f64>>();
     assert_send::<FrozenRecord<f64>>();
 }
 

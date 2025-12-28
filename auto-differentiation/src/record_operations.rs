@@ -1,9 +1,9 @@
-use crate::differentiation::{Record, WengertList};
 use num_traits::real::Real;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToPrimitive, Zero};
 use std::cmp::Ordering;
 use std::fmt::{Formatter, LowerExp};
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
+use crate::{Record, WengertList};
 
 /**
  * A record is displayed by showing its number component.
@@ -195,11 +195,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::differentiation::WengertList;
-    use ndarray_linalg::aclose;
     use num_traits::real::Real;
     use num_traits::NumCast;
     use std::ops::{Add, Mul, Sub};
+    use ndarray_linalg::aclose;
+    use crate::WengertList;
 
     fn k<T: NumCast + Add<Output = T> + Mul<Output = T> + Copy + Sub<Output = T>>(x: T, y: T) -> T {
         let three = T::from(3).unwrap();

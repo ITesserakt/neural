@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::differentiation::Adr;
 use crate::function_v2::OnceDifferentiableFunction;
 use num_traits::{Float, One, Zero};
 
@@ -11,12 +10,11 @@ pub fn sigmoid_fn<T: Float>() -> OnceDifferentiableFunction<T> {
             let z = T::one() / (T::one() + T::exp(-x));
             z * (T::one() - z)
         },
-        &|x| Adr::one() / (Adr::one() + (-x).exp()),
     )
 }
 
 pub fn linear_fn<T: One>() -> OnceDifferentiableFunction<T> {
-    OnceDifferentiableFunction::from_static(&|x: T| x, &|_| T::one(), &|x| x)
+    OnceDifferentiableFunction::from_static(&|x: T| x, &|_| T::one())
 }
 
 pub fn relu_fn<T: PartialOrd + Zero + One + Clone>() -> OnceDifferentiableFunction<T> {
@@ -26,9 +24,6 @@ pub fn relu_fn<T: PartialOrd + Zero + One + Clone>() -> OnceDifferentiableFuncti
         },
         &|x| {
             if x >= T::zero() { T::one() } else { T::zero() }
-        },
-        &|x| {
-            if x >= Adr::zero() { x } else { Adr::zero() }
         },
     )
 }
@@ -40,7 +35,6 @@ pub fn softplus<T: Float>() -> OnceDifferentiableFunction<T> {
             let exp = x.exp();
             exp / (T::one() + exp)
         },
-        &|x| x.exp().ln_1p(),
     )
 }
 
@@ -54,13 +48,6 @@ pub fn elu<T: Float + Send + Sync>(alpha: T) -> OnceDifferentiableFunction<T> {
                 T::one()
             } else {
                 alpha * x.exp()
-            }
-        },
-        move |x| {
-            if x > Adr::zero() {
-                x
-            } else {
-                Adr::constant(alpha) * x.exp_m1()
             }
         },
     )

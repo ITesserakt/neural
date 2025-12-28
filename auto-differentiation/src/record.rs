@@ -44,7 +44,6 @@ struct Slot<T>(UnsafeCell<MaybeUninit<Operation<T>>>);
 pub struct WengertList<T: Copy> {
     operations: Box<[Slot<T>]>,
     last_operation: Cell<usize>,
-    derivatives_pool: object_pool::Pool<Vec<T>>,
 }
 
 /**
@@ -67,8 +66,6 @@ struct Operation<T> {
 struct BorrowedWengertList<'a, T> {
     slot: &'a mut MaybeUninit<Operation<T>>,
 }
-
-pub struct WengertListPool<T: 'static + Copy>(object_pool::Pool<&'static WengertList<T>>);
 
 /**
  * A wrapper around a real number which records it going through the computational
@@ -125,46 +122,11 @@ pub struct FrozenRecord<T: 'static> {
     pub index: usize,
 }
 
-pub(super) mod impls_pool {
-    use crate::differentiation::{WengertList, WengertListPool};
-    use object_pool::Reusable;
-    use tracing::debug;
-
-    unsafe impl<T: Send + Sync + Copy> Sync for WengertListPool<T> {}
-
-    impl<T: 'static + Copy> WengertListPool<T> {
-        pub fn new(capacity: usize) -> Self {
-            Self(object_pool::Pool::new(capacity, || {
-                WengertList::leak(1 << 30)
-            }))
-        }
-
-        pub fn acquire(&self) -> Reusable<'_, &'static WengertList<T>> {
-            self.0.pull(|| WengertList::leak(1 << 30))
-        }
-    }
-
-    impl<T: 'static + Copy> Drop for WengertListPool<T> {
-        fn drop(&mut self) {
-            debug!("Total allocated tapes: {}", self.0.len());
-            while let Some(tape) = self.0.try_pull() {
-                let (_, tape) = Reusable::detach(tape);
-                debug!(?tape, "Dropping tape");
-                while let Some(vec) = tape.derivatives_pool.try_pull() {
-                    vec.detach();
-                }
-                tape.clear();
-            }
-        }
-    }
-}
-
 pub(super) mod impls_list {
-    use crate::differentiation::record::{BorrowedWengertList, Index, Operation};
-    use crate::differentiation::{Record, WengertList};
-    use num_traits::Zero;
     use std::cell::Cell;
     use std::fmt::{Debug, Formatter};
+    use num_traits::Zero;
+    use crate::record::{BorrowedWengertList, Index, Operation, Record, WengertList};
 
     impl<T: Copy> Debug for WengertList<T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -188,7 +150,6 @@ pub(super) mod impls_list {
                     std::mem::transmute(Box::<[Operation<T>]>::new_uninit_slice(capacity))
                 },
                 last_operation: Cell::new(0),
-                derivatives_pool: object_pool::Pool::new(1, || Vec::new()),
             }
         }
 
@@ -297,11 +258,12 @@ pub(super) mod impls_list {
 }
 
 pub(super) mod impls_record {
-    use crate::differentiation::record_operations::same_list;
-    use crate::differentiation::{Derivatives, FrozenRecord, Indexed, Record, WengertList};
-    use num_traits::{One, Zero};
     use std::fmt::{Debug, Formatter};
     use std::ops::AddAssign;
+    use num_traits::{One, Zero};
+    use crate::{Derivatives, Indexed};
+    use crate::record::{FrozenRecord, Record, WengertList};
+    use crate::record_operations::same_list;
 
     impl<T: Debug + Copy> Debug for Record<'_, T> {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -440,7 +402,7 @@ pub(super) mod impls_record {
          * constant.
          */
         #[track_caller]
-        pub fn derivatives(&self) -> Derivatives<'_, T>
+        pub fn derivatives(&self) -> Derivatives<T>
         where
             T: Clone + Zero + One + AddAssign,
         {
@@ -460,7 +422,7 @@ pub(super) mod impls_record {
          * If you have N inputs x<sub>1</sub> to x<sub>N</sub>, and this output is y,
          * then this computes all the derivatives δy/δx<sub>i</sub> for i = 1 to N.
          */
-        pub fn try_derivatives(&self) -> Option<Derivatives<'_, T>>
+        pub fn try_derivatives(&self) -> Option<Derivatives<T>>
         where
             T: Clone + Zero + One + AddAssign,
         {
@@ -468,9 +430,7 @@ pub(super) mod impls_record {
             let operations = &history.operations;
             let len = history.last_operation.get();
 
-            let mut adjoints = history.derivatives_pool.pull(|| Vec::new());
-            adjoints.clear();
-            adjoints.resize(len, T::zero());
+            let mut adjoints = vec![T::zero(); len];
 
             // δy/δy = 1
             adjoints[self.index()] = T::one();

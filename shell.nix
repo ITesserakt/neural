@@ -6,11 +6,12 @@ pkgs.mkShell {
     rustup
 
     pkg-config
+    llvmPackages.bintools
 
-    blas
-    openblas
-    openssl
-    gfortran
+    # blas
+    # openblas
+    # openssl
+    # gfortran
 
     (with python3Packages; [
       datasets
@@ -19,5 +20,5 @@ pkgs.mkShell {
     ])
   ];
 
-  RUSTFLAGS = "-lblas";
+  # RUSTFLAGS = "-lblas";
 }

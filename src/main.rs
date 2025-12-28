@@ -1,11 +1,12 @@
 use crate::activation::{linear_fn, sigmoid_fn};
 use crate::config::Config;
-use crate::differentiation::{Record, WengertListPool, AD};
-use crate::function_v2::{ArrayFunction, OnceDifferentiableFunction, Softmax};
+use crate::function_v2::{ArrayFunction, Softmax};
 use crate::mnist::Mnist;
 use crate::network::config::Ready;
 use crate::network::Network;
 use crate::utils::{Permutation, PermuteArray};
+use auto_differentiation::record::{Record, WengertList};
+use auto_differentiation::AD;
 use clap::Parser;
 use indicatif::ProgressStyle;
 use ndarray::{s, Array2, ArrayView1, ArrayView2, Axis, Ix1, Zip};
@@ -30,7 +31,6 @@ use tracing_subscriber::Layer;
 
 mod activation;
 mod config;
-mod differentiation;
 mod function_v2;
 mod mnist;
 mod network;
@@ -43,7 +43,6 @@ struct Env<'a, T: 'static + Copy, F> {
     test_xs: ArrayView2<'a, T>,
     test_ys: Array2<T>,
     config: Config,
-    tapes: WengertListPool<T>,
 }
 
 impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
@@ -55,7 +54,6 @@ impl<'a, T: Element + Scalar, F> Env<'a, T, F> {
             test_xs: Mnist::features_flattened(mnist.test().features()),
             test_ys: Mnist::targets_unrolled(mnist.test().targets()),
             config,
-            tapes: WengertListPool::new(1),
         }
     }
 }
@@ -81,14 +79,15 @@ impl<F: ArrayFunction<Ix1> + Send + Sync> Env<'_, f32, F> {
     {
         let mut message = String::new();
         Span::current().pb_set_length(xs.nrows() as u64 / self.config.batch_size as u64);
+        let tape = WengertList::leak(1 << 25);
+
         for (xs, ys) in xs
             .axis_chunks_iter(Axis(0), self.config.batch_size)
             .zip(ys.axis_chunks_iter(Axis(0), self.config.batch_size))
         {
-            let tape = self.tapes.acquire();
             let (loss, _) =
                 self.network
-                    .learn(xs, ys, self.config.learning_rate, cross_entropy, *tape);
+                    .learn(xs, ys, self.config.learning_rate, cross_entropy, tape);
 
             message.clear();
             trace!(target: "output", "{loss}");
@@ -178,11 +177,8 @@ where
     T: Float + DivAssign + 'static,
     A: AD<'a, T> + Neg<Output = A>,
 {
-    let ln_fn =
-        OnceDifferentiableFunction::from_static(&|x: T| x.ln(), &|x: T| T::one() / x, &|x| x.ln());
-
     -Zip::from(&yp).and(&yr).fold(A::zero(), |acc, yp, &yr| {
-        acc + A::constant(yr) * yp.apply_function(&ln_fn)
+        acc + A::constant(yr) * yp.apply_function(|x| x.ln(), |x| T::one() / x)
     })
 }
 
